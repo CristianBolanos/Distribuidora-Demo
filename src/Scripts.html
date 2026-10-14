@@ -1,0 +1,340 @@
+<script>
+'use strict';
+/* =====================================================================
+ * Scripts.html — Núcleo del frontend: comunicación con el backend,
+ * componentes compartidos (modales, avisos, tablas), navegación y dashboard.
+ * Todo el contenido dinámico se escapa con esc() antes de insertarse.
+ * ===================================================================== */
+
+const S = {
+  user: null, perms: new Set(), cfg: {}, cat: {}, usuarios: [], productos: null, rutas: null,
+  view: null, charts: {}, timer: null,
+  dash: { tipo: '7d' },
+  pq: { page: 1, pageSize: 20, sortBy: 'fecha_creacion', sortDir: 'desc' }
+};
+const can = (p) => S.perms.has(p);
+
+/* ---------- Utilidades ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function fD(s) { const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; }
+function fDT(s) { const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : fD(s); }
+const COP = new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 });
+const NUM = new Intl.NumberFormat('es-CO', { maximumFractionDigits: 2 });
+const fCOP = (n) => (n === null || n === undefined || n === '') ? '—' : COP.format(Number(n));
+const fNum = (n) => NUM.format(Number(n) || 0);
+function bogParts() {
+  return Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date()).map((x) => [x.type, x.value]));
+}
+function todayBog() { const p = bogParts(); return `${p.year}-${p.month}-${p.day}`; }
+function nowBogLocal() { const p = bogParts(); return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`; }
+const icons = () => { if (window.lucide) lucide.createIcons(); };
+const rid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2);
+const errMsg = (e) => (e && e.message) || 'Ocurrió un error inesperado.';
+const userName = (id) => (S.usuarios.find((u) => u.usuario_id === id) || {}).nombre || '';
+
+/* ---------- Comunicación con Apps Script ---------- */
+function api(action, payload = {}) {
+  return new Promise((resolve, reject) => {
+    google.script.run
+      .withSuccessHandler((r) => {
+        if (r && r.ok) return resolve(r.data);
+        const err = (r && r.error) || { code: 'DESCONOCIDO', message: 'Respuesta inválida del servidor.' };
+        if (err.code === 'NO_AUTORIZADO' || err.code === 'NO_AUTENTICADO') showFatal(err);
+        reject(err);
+      })
+      .withFailureHandler(() => reject({ code: 'CONEXION', message: 'No se pudo conectar con el servidor. Verifique su conexión e intente nuevamente.' }))
+      .api(action, payload);
+  });
+}
+
+/** Ejecuta una acción de escritura: deshabilita el botón, envía un id de solicitud y muestra el resultado. */
+async function run(action, payload, btn, okMsg) {
+  if (btn && btn.disabled) return null;
+  let html;
+  if (btn) { btn.disabled = true; html = btn.innerHTML; btn.innerHTML = '<span class="spinner sm"></span> Procesando…'; }
+  try {
+    const r = await api(action, Object.assign({}, payload, { _requestId: rid() }));
+    if (okMsg) toast(okMsg, 'ok');
+    return r || {};
+  } catch (e) {
+    toast(errMsg(e), e.code === 'CONFLICTO' ? 'warn' : 'error');
+    return null;
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = html; icons(); }
+  }
+}
+
+/* ---------- Componentes ---------- */
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  const ic = { ok: 'check-circle', error: 'alert-circle', warn: 'alert-triangle', info: 'info' }[type] || 'info';
+  el.innerHTML = `<i data-lucide="${ic}"></i><span>${esc(msg)}</span>`;
+  $('#toasts').appendChild(el); icons();
+  setTimeout(() => el.remove(), type === 'error' ? 7000 : 4000);
+}
+
+function openModal({ title, body, footer = '', size = '' }) {
+  const el = document.createElement('div');
+  el.className = 'modal-overlay';
+  el.innerHTML = `<div class="modal ${size}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+    <div class="modal-head"><h2>${esc(title)}</h2><button class="icon-btn" data-close aria-label="Cerrar"><i data-lucide="x"></i></button></div>
+    <div class="modal-body">${body}</div>${footer ? `<div class="modal-foot">${footer}</div>` : ''}</div>`;
+  $('#modalRoot').appendChild(el);
+  const close = () => { el.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape' && $('#modalRoot').lastElementChild === el) close(); };
+  document.addEventListener('keydown', onKey);
+  el.addEventListener('click', (e) => { if (e.target === el || e.target.closest('[data-close]')) close(); });
+  icons();
+  const first = el.querySelector('input, select, textarea'); if (first) setTimeout(() => first.focus(), 30);
+  return { el, close, body: el.querySelector('.modal-body'), foot: el.querySelector('.modal-foot') };
+}
+
+/** Diálogo de confirmación. Si se pide input, devuelve el texto escrito; si no, true. Cancelar → false. */
+function confirmDialog({ title, message, confirmText = 'Confirmar', danger = false, input = null }) {
+  return new Promise((resolve) => {
+    const m = openModal({
+      title,
+      body: `<p style="margin-top:0">${message}</p>${input ? `<div class="field"><label>${esc(input.label)}${input.required ? ' <span class="req">*</span>' : ''}</label><textarea id="cdInput" maxlength="500" placeholder="${esc(input.placeholder || '')}"></textarea>${input.min ? `<span class="help">Mínimo ${input.min} caracteres.</span>` : ''}</div>` : ''}`,
+      footer: `<button class="btn" data-close>Cancelar</button><button class="btn ${danger ? 'danger' : 'primary'}" id="cdOk">${esc(confirmText)}</button>`
+    });
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    new MutationObserver((_, o) => { if (!m.el.isConnected) { o.disconnect(); finish(false); } }).observe($('#modalRoot'), { childList: true });
+    $('#cdOk', m.el).onclick = () => {
+      if (input) {
+        const v = $('#cdInput', m.el).value.trim();
+        if (input.required && v.length < (input.min || 1)) { toast(`Escriba ${input.min ? 'al menos ' + input.min + ' caracteres' : 'un texto'} en "${input.label}".`, 'warn'); return; }
+        finish(v); m.close(); return;
+      }
+      finish(true); m.close();
+    };
+  });
+}
+
+const loadingHTML = (t = 'Cargando…') => `<div class="loading"><div class="spinner"></div><p>${esc(t)}</p></div>`;
+const emptyHTML = (t = 'No hay resultados para mostrar.', ic = 'inbox') => `<div class="empty"><i data-lucide="${ic}"></i><p>${esc(t)}</p></div>`;
+const errorHTML = (e) => `<div class="error-box"><i data-lucide="alert-triangle"></i><p>${esc(errMsg(e))}</p></div>`;
+
+function estadoBadge(e, anulado) {
+  if (anulado) return '<span class="badge b-anulado">Anulado</span>';
+  const c = { 'Pendiente': 'b-pendiente', 'En preparación': 'b-preparacion', 'Despachado': 'b-despachado', 'Entregado': 'b-entregado' }[e] || '';
+  return `<span class="badge ${c}">${esc(e)}</span>`;
+}
+const prioBadge = (p) => `<span class="badge b-${esc(p)}">${esc((p || '').charAt(0).toUpperCase() + (p || '').slice(1))}</span>`;
+const rutaEstadoBadge = (e) => `<span class="badge ${{ planificada: 'b-pendiente', activa: 'b-despachado', finalizada: 'b-entregado', cancelada: 'b-anulado' }[e] || ''}">${esc(e)}</span>`;
+
+function options(list, val, { empty = null, key = (x) => x, label = (x) => x } = {}) {
+  return (empty !== null ? `<option value="">${esc(empty)}</option>` : '') +
+    list.map((x) => `<option value="${esc(key(x))}" ${String(key(x)) === String(val ?? '') ? 'selected' : ''}>${esc(label(x))}</option>`).join('');
+}
+const userOptions = (val, empty = 'Sin asignar', filtro = null) =>
+  options(S.usuarios.filter((u) => !filtro || filtro.includes(u.rol) || u.usuario_id === val), val, { empty, key: (u) => u.usuario_id, label: (u) => `${u.nombre} (${u.rol})` });
+
+async function loadRutas(force) {
+  if (!S.rutas || force) S.rutas = await api('rutas.list', {});
+  return S.rutas;
+}
+async function loadProductos(force) {
+  if (!S.productos || force) S.productos = await api('productos.list', { soloActivos: false });
+  return S.productos;
+}
+const rutaOptions = (val, empty = 'Sin ruta', soloAbiertas = true) =>
+  options((S.rutas || []).filter((r) => !soloAbiertas || ['planificada', 'activa'].includes(r.estado) || r.ruta_id === val), val,
+    { empty, key: (r) => r.ruta_id, label: (r) => `${r.codigo_ruta} · ${r.nombre_ruta} (${fD(r.fecha_operacion)}, ${r.estado})` });
+
+/** Tabla genérica. cols: [{key,label,render?,cls?,sort?}] */
+function tableHTML(cols, rows, { sort = null, rowAttr = () => '', cards = true } = {}) {
+  if (!rows.length) return emptyHTML();
+  const th = cols.map((c) => {
+    const ind = sort && sort.by === c.sort ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return `<th class="${c.sort ? 'sortable' : ''} ${c.cls || ''}" ${c.sort ? `data-sort="${c.sort}"` : ''}>${esc(c.label)}${ind}</th>`;
+  }).join('');
+  const tr = rows.map((r) => `<tr ${rowAttr(r)}>${cols.map((c) => `<td class="${c.cls || ''}" data-label="${esc(c.label)}">${c.render ? c.render(r) : esc(r[c.key])}</td>`).join('')}</tr>`).join('');
+  return `<div class="table-wrap"><table class="t ${cards ? 'cards' : ''}"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`;
+}
+
+function pagerHTML(res) {
+  return `<div class="pager"><span>${res.total} registro(s) · Página ${res.page} de ${res.pages}</span>
+    <div class="btns"><button class="btn sm" data-page="${res.page - 1}" ${res.page <= 1 ? 'disabled' : ''}><i data-lucide="chevron-left"></i>Anterior</button>
+    <button class="btn sm" data-page="${res.page + 1}" ${res.page >= res.pages ? 'disabled' : ''}>Siguiente<i data-lucide="chevron-right"></i></button></div></div>`;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function showFatal(err) {
+  $('#app').classList.add('hidden');
+  const b = $('#boot');
+  b.classList.remove('hidden');
+  b.innerHTML = `<div class="access-denied"><h2>Acceso no disponible</h2><p>${esc(errMsg(err))}</p>
+    <p class="help">Si cree que es un error, contacte al administrador del sistema.</p></div>`;
+}
+
+/* ---------- Navegación ---------- */
+const NAV = [
+  { id: 'dashboard', label: 'Dashboard', icon: 'layout-dashboard', perm: 'dashboard.ver' },
+  { id: 'pedidos', label: 'Pedidos', icon: 'package', perm: 'pedidos.ver' },
+  { id: 'preparacion', label: 'Preparación', icon: 'clipboard-check', perm: 'preparacion.gestionar' },
+  { id: 'despacho', label: 'Despacho y entregas', icon: 'truck', perm: 'despacho.gestionar' },
+  { id: 'rutas', label: 'Rutas', icon: 'map', perm: 'rutas.ver' },
+  { id: 'reportes', label: 'Reportes', icon: 'file-bar-chart', perm: 'reportes.ver' },
+  { id: 'productos', label: 'Productos', icon: 'boxes', perm: 'productos.gestionar' },
+  { id: 'usuarios', label: 'Usuarios y permisos', icon: 'users', perm: 'usuarios.gestionar' },
+  { id: 'historial', label: 'Auditoría', icon: 'history', perm: 'historial.ver' },
+  { id: 'config', label: 'Configuración', icon: 'settings', perm: 'config.gestionar' }
+];
+const VIEWS = {};
+
+function go(view) {
+  const item = NAV.find((n) => n.id === view && can(n.perm)) || NAV.find((n) => can(n.perm));
+  if (!item) return;
+  S.view = item.id;
+  clearInterval(S.timer);
+  Object.values(S.charts).forEach((c) => c.destroy()); S.charts = {};
+  $$('.nav-item').forEach((a) => a.classList.toggle('active', a.dataset.view === item.id));
+  $('#viewTitle').textContent = item.label;
+  $('#topActions').innerHTML = '';
+  $('#sidebar').classList.remove('open'); $('#backdrop').classList.remove('show');
+  $('#view').innerHTML = loadingHTML();
+  try { history.replaceState(null, '', '#' + item.id); } catch (e) { /* entorno sandbox */ }
+  VIEWS[item.id]();
+  icons();
+}
+
+function buildShell() {
+  $('#brandName').textContent = S.cfg.nombre_empresa || 'Pedidos y Despacho';
+  $('#nav').innerHTML = NAV.filter((n) => can(n.perm))
+    .map((n) => `<a href="#" class="nav-item" data-view="${n.id}"><i data-lucide="${n.icon}"></i><span>${esc(n.label)}</span></a>`).join('');
+  $('#nav').onclick = (e) => { const a = e.target.closest('.nav-item'); if (a) { e.preventDefault(); go(a.dataset.view); } };
+  $('#sidebarUser').innerHTML = `<strong>${esc(S.user.nombre)}</strong>${esc(S.user.correo)}<br><span class="badge" style="margin-top:4px">${esc(S.user.rol)}</span>`;
+  $('#menuBtn').onclick = () => { $('#sidebar').classList.add('open'); $('#backdrop').classList.add('show'); };
+  $('#backdrop').onclick = () => { $('#sidebar').classList.remove('open'); $('#backdrop').classList.remove('show'); };
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const s = await api('session.get');
+    S.user = s.usuario; S.perms = new Set(s.permisos); S.cfg = s.config; S.cat = s.catalogos; S.usuarios = s.catalogos.usuarios;
+    buildShell();
+    $('#boot').classList.add('hidden'); $('#app').classList.remove('hidden');
+    go((location.hash || '').slice(1) || 'dashboard');
+  } catch (e) {
+    showFatal(e);
+  }
+});
+
+/* =====================================================================
+ * Dashboard
+ * ===================================================================== */
+VIEWS.dashboard = function () {
+  $('#topActions').innerHTML = `<button class="btn" id="dashRefresh"><i data-lucide="refresh-cw"></i>Actualizar</button>`;
+  $('#view').innerHTML = `
+    <div class="toolbar">
+      <div class="seg" id="periodSeg">
+        ${[['hoy', 'Hoy'], ['7d', '7 días'], ['30d', '30 días'], ['rango', 'Rango']].map(([k, l]) => `<button data-p="${k}" class="${S.dash.tipo === k ? 'active' : ''}">${l}</button>`).join('')}
+      </div>
+      <div id="rangeBox" class="toolbar ${S.dash.tipo === 'rango' ? '' : 'hidden'}" style="margin:0">
+        <div class="field"><label>Desde</label><input type="date" id="dDesde" value="${esc(S.dash.desde || '')}"></div>
+        <div class="field"><label>Hasta</label><input type="date" id="dHasta" value="${esc(S.dash.hasta || '')}"></div>
+        <button class="btn primary" id="dApply">Aplicar</button>
+      </div>
+      <span class="grow"></span><span class="muted" id="dashInfo"></span>
+    </div>
+    <div class="kpis" id="kpis">${'<div class="skeleton"></div>'.repeat(8)}</div>
+    <div class="grid-2">
+      <div class="card"><h3><i data-lucide="pie-chart"></i>Pedidos por estado <span class="sub">(creados en el período)</span></h3><div class="chart-box"><canvas id="chEstado"></canvas></div></div>
+      <div class="card"><h3><i data-lucide="trending-up"></i>Evolución diaria <span class="sub">(pedidos creados)</span></h3><div class="chart-box"><canvas id="chEvol"></canvas></div></div>
+      <div class="card"><h3><i data-lucide="truck"></i>Despachados y entregados por día</h3><div class="chart-box"><canvas id="chDesp"></canvas></div></div>
+      <div class="card"><h3><i data-lucide="map"></i>Rendimiento de rutas <span class="sub">(pedidos creados en el período)</span></h3><div class="chart-box"><canvas id="chRutas"></canvas></div></div>
+    </div>
+    <div class="grid-2 section-gap">
+      <div class="card"><h3><i data-lucide="users"></i>Pedidos por responsable</h3><div class="chart-box"><canvas id="chResp"></canvas></div></div>
+      <div class="card"><h3><i data-lucide="bell"></i>Alertas operativas</h3><div id="alertas">${loadingHTML()}</div></div>
+    </div>
+    <details class="card section-gap"><summary style="cursor:pointer;font-weight:600">Definición de los indicadores</summary>
+      <ul class="help" style="margin-bottom:0">
+        <li><b>Totales y estados:</b> situación actual de todos los pedidos no anulados; cada pedido se cuenta una sola vez en su estado vigente.</li>
+        <li><b>Retrasados:</b> pedidos no entregados cuya fecha estimada de entrega es anterior a hoy.</li>
+        <li><b>Creados hoy / entregados hoy:</b> según la fecha de creación y la fecha real de entrega (hora de Bogotá).</li>
+        <li><b>Gráficos:</b> estado, evolución, rutas y responsables usan los pedidos creados en el período; despachados/entregados usan la fecha real de cada evento.</li>
+        <li><b>Rendimiento de rutas:</b> “a tiempo” = entregado en o antes de la fecha estimada.</li>
+        <li>Las alertas son informativas y nunca cambian el estado de un pedido. Los umbrales se configuran en Configuración.</li>
+      </ul></details>`;
+  $('#periodSeg').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    $$('#periodSeg button').forEach((x) => x.classList.toggle('active', x === b));
+    $('#rangeBox').classList.toggle('hidden', b.dataset.p !== 'rango');
+    if (b.dataset.p !== 'rango') { S.dash = { tipo: b.dataset.p }; loadDashboard(); }
+  };
+  $('#dApply').onclick = () => {
+    const desde = $('#dDesde').value, hasta = $('#dHasta').value;
+    if (!desde || !hasta) return toast('Seleccione ambas fechas del rango.', 'warn');
+    if (desde > hasta) return toast('La fecha inicial no puede ser posterior a la final.', 'warn');
+    S.dash = { tipo: 'rango', desde, hasta }; loadDashboard();
+  };
+  $('#dashRefresh').onclick = () => loadDashboard();
+  loadDashboard();
+  const secs = Math.max(30, Number(S.cfg.intervalo_actualizacion_seg) || 60);
+  S.timer = setInterval(() => { if (S.view === 'dashboard' && !document.hidden && !$('#modalRoot').children.length) loadDashboard(true); }, secs * 1000);
+};
+
+async function loadDashboard(silent) {
+  try {
+    const d = await api('dashboard.get', S.dash);
+    if (S.view !== 'dashboard') return;
+    const k = d.kpis;
+    const kpi = (ic, cls, val, lbl) => `<div class="kpi"><div class="ico ${cls}"><i data-lucide="${ic}"></i></div><div><div class="val">${fNum(val)}</div><div class="lbl">${lbl}</div></div></div>`;
+    $('#kpis').innerHTML = kpi('package', '', k.total, 'Pedidos registrados') + kpi('clock', 'info', k.pendientes, 'Pendientes') +
+      kpi('clipboard-list', 'warn', k.preparacion, 'En preparación') + kpi('truck', '', k.despachados, 'Despachados') +
+      kpi('check-circle', 'ok', k.entregados, 'Entregados') + kpi('alert-triangle', 'err', k.retrasados, 'Con retraso') +
+      kpi('plus-circle', 'info', k.creadosHoy, 'Creados hoy') + kpi('package-check', 'ok', k.entregadosHoy, 'Entregados hoy');
+    $('#dashInfo').textContent = `${d.periodo.label} · Actualizado ${fDT(d.generado)}`;
+    renderDashCharts(d);
+    renderAlertas(d.alertas);
+    icons();
+  } catch (e) {
+    if (!silent) { $('#kpis').innerHTML = errorHTML(e); toast(errMsg(e), 'error'); }
+  }
+}
+
+function chart(id, cfg) {
+  if (S.charts[id]) S.charts[id].destroy();
+  const c = document.getElementById(id);
+  if (!c || !window.Chart) return;
+  S.charts[id] = new Chart(c, cfg);
+}
+const C = { primary: '#4F46E5', ok: '#16A34A', warn: '#D97706', err: '#DC2626', slate: '#94A3B8', info: '#0284C7' };
+const baseOpts = (extra = {}) => Object.assign({ responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { family: 'Inter' } } } } }, extra);
+
+function renderDashCharts(d) {
+  if (!window.Chart) { $$('.chart-box').forEach((b) => { b.innerHTML = emptyHTML('No fue posible cargar la librería de gráficos.'); }); return; }
+  Chart.defaults.font.family = 'Inter, system-ui, sans-serif';
+  Chart.defaults.color = '#475569';
+  const labels = d.evolucion.dias.map(fD);
+  chart('chEstado', { type: 'doughnut', data: { labels: d.porEstado.map((x) => x.estado), datasets: [{ data: d.porEstado.map((x) => x.total), backgroundColor: [C.slate, C.warn, C.primary, C.ok] }] }, options: baseOpts() });
+  chart('chEvol', { type: 'line', data: { labels, datasets: [{ label: 'Pedidos creados', data: d.evolucion.creados, borderColor: C.primary, backgroundColor: 'rgba(79,70,229,.12)', fill: true, tension: .3 }] }, options: baseOpts({ scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }) });
+  chart('chDesp', { type: 'bar', data: { labels, datasets: [{ label: 'Despachados', data: d.evolucion.despachados, backgroundColor: C.primary }, { label: 'Entregados', data: d.evolucion.entregados, backgroundColor: C.ok }] }, options: baseOpts({ scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }) });
+  chart('chRutas', { type: 'bar', data: { labels: d.rutas.map((r) => r.nombre), datasets: [{ label: 'Asignados', data: d.rutas.map((r) => r.total), backgroundColor: C.slate }, { label: 'Entregados', data: d.rutas.map((r) => r.entregados), backgroundColor: C.primary }, { label: 'A tiempo', data: d.rutas.map((r) => r.aTiempo), backgroundColor: C.ok }] }, options: baseOpts({ indexAxis: 'y', scales: { x: { beginAtZero: true, ticks: { precision: 0 } } } }) });
+  chart('chResp', { type: 'bar', data: { labels: d.responsables.map((r) => r.nombre), datasets: [{ label: 'Pedidos', data: d.responsables.map((r) => r.total), backgroundColor: C.info }] }, options: baseOpts({ plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }) });
+}
+
+function renderAlertas(alertas) {
+  const total = alertas.reduce((a, g) => a + g.total, 0);
+  if (!total) { $('#alertas').innerHTML = emptyHTML('No hay alertas operativas en este momento.', 'check-circle'); return; }
+  const ic = { warning: 'alert-triangle', error: 'alert-octagon', info: 'info' };
+  $('#alertas').innerHTML = alertas.filter((g) => g.total).map((g) => `
+    <details class="alert-group l-${g.nivel}"><summary><i data-lucide="${ic[g.nivel]}"></i>${esc(g.titulo)}<span class="badge count">${g.total}</span></summary>
+      <div class="alert-list">${g.items.map((i) => `<div class="alert-item"><a href="#" data-pedido="${esc(i.pedido_id)}">${esc(i.numero_pedido)}</a>
+        <span>${esc(i.cliente_nombre)}</span>${prioBadge(i.prioridad)}<span class="muted">${esc(i.detalle)}</span></div>`).join('')}
+        ${g.total > g.items.length ? `<p class="help">Se muestran ${g.items.length} de ${g.total}.</p>` : ''}</div></details>`).join('');
+  $('#alertas').onclick = (e) => { const a = e.target.closest('[data-pedido]'); if (a) { e.preventDefault(); openPedido(a.dataset.pedido); } };
+}
+</script>

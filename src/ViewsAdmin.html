@@ -1,0 +1,215 @@
+<script>
+'use strict';
+/* =====================================================================
+ * ViewsAdmin.html — Reportes, productos, usuarios, auditoría y configuración.
+ * ===================================================================== */
+
+const REPORTES = [
+  ['registrados', 'Pedidos registrados por período'], ['estado', 'Pedidos por estado'], ['despachados', 'Pedidos despachados'],
+  ['entregados', 'Pedidos entregados'], ['pendientes', 'Pedidos pendientes'], ['retrasados', 'Pedidos retrasados'],
+  ['ruta', 'Pedidos por ruta'], ['responsable', 'Pedidos por responsable'], ['historial', 'Historial de operaciones'], ['rendimiento', 'Rendimiento de entregas']
+];
+
+VIEWS.reportes = async function () {
+  const tipos = REPORTES.filter(([k]) => k !== 'historial' || can('historial.ver'));
+  const hoy = todayBog();
+  const hace30 = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  $('#view').innerHTML = `
+    <div class="card"><form id="rpF" class="filters" autocomplete="off">
+      <div class="field" style="grid-column:span 2"><label>Informe</label><select name="tipo">${options(tipos, 'registrados', { key: (x) => x[0], label: (x) => x[1] })}</select></div>
+      <div class="field"><label>Desde</label><input type="date" name="desde" value="${hace30}"></div>
+      <div class="field"><label>Hasta</label><input type="date" name="hasta" value="${hoy}"></div>
+      <div class="field"><label>Estado</label><select name="estado">${options(S.cat.estados, '', { empty: 'Todos' })}</select></div>
+      <div class="field"><label>Ruta</label><select name="ruta_id" id="rpRuta"><option value="">Todas</option></select></div>
+      <div class="field"><label>Responsable</label><select name="responsable_id">${options([{ usuario_id: '__none', nombre: 'Sin responsable' }].concat(S.usuarios), '', { empty: 'Todos', key: (u) => u.usuario_id, label: (u) => u.nombre })}</select></div>
+      <div class="field"><label>Prioridad</label><select name="prioridad">${options(S.cat.prioridades, '', { empty: 'Todas' })}</select></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1">
+        <button class="btn primary" type="submit"><i data-lucide="eye"></i>Generar vista previa</button>
+        <button class="btn" type="button" id="rpCsv"><i data-lucide="file-spreadsheet"></i>Exportar CSV</button>
+        <button class="btn" type="button" id="rpPdf"><i data-lucide="file-text"></i>Exportar PDF</button></div>
+    </form><p class="help" style="margin-bottom:0">Las fechas filtran por creación del pedido (despachados y entregados: por fecha real del evento). Los informes se calculan en el servidor con sus permisos; los pedidos anulados no se incluyen.</p></div>
+    <div id="rpOut"></div>`;
+  const params = () => {
+    const fd = new FormData($('#rpF'));
+    const p = Object.fromEntries(fd.entries());
+    if (p.desde && p.hasta && p.desde > p.hasta) { toast('La fecha inicial no puede ser posterior a la final.', 'warn'); return null; }
+    return p;
+  };
+  $('#rpF').onsubmit = async (e) => {
+    e.preventDefault();
+    const p = params(); if (!p) return;
+    $('#rpOut').innerHTML = loadingHTML('Generando informe…');
+    try {
+      const r = await api('reportes.generar', p);
+      const filas = r.filas.slice(0, 300);
+      $('#rpOut').innerHTML = `<div class="card"><h3>${esc(r.titulo)}</h3>
+        <p class="help">Período: ${esc(r.periodo)} · ${esc(r.filtros)} · Generado ${esc(r.generado)}</p>
+        ${r.totales.map((t) => `<span class="badge" style="margin:0 6px 10px 0">${esc(t.label)}: ${esc(t.valor)}</span>`).join('')}
+        ${r.filas.length ? `<div class="table-wrap"><table class="t"><thead><tr>${r.columnas.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+          <tbody>${filas.map((f) => `<tr>${f.map((v) => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : emptyHTML('No hay registros para los filtros seleccionados.')}
+        ${r.filas.length > filas.length ? `<p class="help">Vista previa limitada a ${filas.length} de ${r.filas.length} filas. Las exportaciones incluyen todas.</p>` : ''}
+        ${r.truncado ? '<p class="help">El informe superó el máximo de filas y fue recortado. Use filtros más específicos.</p>' : ''}</div>`;
+    } catch (err) { $('#rpOut').innerHTML = errorHTML(err); }
+    icons();
+  };
+  $('#rpCsv').onclick = async (e) => {
+    const p = params(); if (!p) return;
+    const r = await run('reportes.csv', p, e.currentTarget);
+    if (r) { downloadBlob(new Blob([r.content], { type: 'text/csv;charset=utf-8' }), r.filename); toast(`CSV generado (${r.filas} filas).`, 'ok'); }
+  };
+  $('#rpPdf').onclick = async (e) => {
+    const p = params(); if (!p) return;
+    const r = await run('reportes.pdf', p, e.currentTarget);
+    if (r) {
+      const bin = atob(r.base64); const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      downloadBlob(new Blob([bytes], { type: 'application/pdf' }), r.filename); toast('PDF generado.', 'ok');
+    }
+  };
+  icons();
+  try {
+    await loadRutas();
+    $('#rpRuta').innerHTML = options([{ ruta_id: '__none', codigo_ruta: 'Sin ruta', nombre_ruta: '' }].concat(S.rutas), '',
+      { empty: 'Todas', key: (r) => r.ruta_id, label: (r) => r.nombre_ruta ? `${r.codigo_ruta} · ${r.nombre_ruta}` : r.codigo_ruta });
+  } catch (e) { /* filtro de ruta queda en "Todas" */ }
+};
+
+/* ---------- Productos ---------- */
+VIEWS.productos = async function () {
+  $('#topActions').innerHTML = '<button class="btn primary" id="btnProd"><i data-lucide="plus"></i>Nuevo producto</button>';
+  $('#btnProd').onclick = () => openProductoForm();
+  try {
+    const list = await loadProductos(true);
+    if (S.view !== 'productos') return;
+    $('#view').innerHTML = `<div class="notice info"><i data-lucide="info"></i><div>Catálogo de referencia. Esta versión no controla existencias de inventario. Desactive un producto en lugar de borrarlo para conservar el historial.</div></div>` +
+      (list.length ? tableHTML([
+        { label: 'SKU', render: (p) => `<b>${esc(p.sku)}</b>` }, { label: 'Nombre', key: 'nombre' }, { label: 'Unidad', key: 'unidad_medida' },
+        { label: 'Precio ref.', cls: 'num', render: (p) => p.precio_referencia !== '' ? fCOP(p.precio_referencia) : '—' },
+        { label: 'Estado', render: (p) => p.activo === 'SI' ? '<span class="badge b-ok">Activo</span>' : '<span class="badge b-anulado">Inactivo</span>' },
+        { label: 'Actualizado', render: (p) => fDT(p.fecha_actualizacion) }
+      ], list, { rowAttr: (p) => `class="clickable" data-id="${esc(p.producto_id)}"` }) : emptyHTML('No hay productos registrados.', 'boxes'));
+    $('#view').onclick = (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) openProductoForm(S.productos.find((p) => p.producto_id === tr.dataset.id)); };
+  } catch (e) { $('#view').innerHTML = errorHTML(e); }
+  icons();
+};
+
+function openProductoForm(p) {
+  p = p || { activo: 'SI', unidad_medida: 'und' };
+  const m = openModal({ title: p.producto_id ? 'Editar producto' : 'Nuevo producto', body: `<form id="prf" class="form-grid" autocomplete="off">
+    <div class="field"><label>SKU <span class="req">*</span></label><input name="sku" maxlength="40" value="${esc(p.sku)}"></div>
+    <div class="field span-2"><label>Nombre <span class="req">*</span></label><input name="nombre" maxlength="150" value="${esc(p.nombre)}"></div>
+    <div class="field"><label>Unidad de medida <span class="req">*</span></label><input name="unidad_medida" maxlength="20" value="${esc(p.unidad_medida)}"></div>
+    <div class="field span-2"><label>Precio de referencia (COP, opcional)</label><input type="number" min="0" step="1" name="precio_referencia" value="${esc(p.precio_referencia)}"></div>
+    <div class="field span-3"><label>Descripción</label><textarea name="descripcion" maxlength="500">${esc(p.descripcion)}</textarea></div>
+    <label class="check span-3"><input type="checkbox" name="activo" ${p.activo === 'SI' ? 'checked' : ''}> Producto activo</label></form>`,
+    footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="prOk"><i data-lucide="save"></i>Guardar</button>' });
+  $('#prOk', m.el).onclick = async (e) => {
+    const f = $('#prf', m.el).elements;
+    const data = { producto_id: p.producto_id || '', sku: f.sku.value.trim(), nombre: f.nombre.value.trim(), unidad_medida: f.unidad_medida.value.trim(),
+      precio_referencia: f.precio_referencia.value, descripcion: f.descripcion.value.trim(), activo: f.activo.checked };
+    if (!data.sku || !data.nombre || !data.unidad_medida) return toast('Complete SKU, nombre y unidad de medida.', 'warn');
+    if (await run('productos.save', data, e.currentTarget, 'Producto guardado.')) { m.close(); S.productos = null; VIEWS.productos(); }
+  };
+}
+
+/* ---------- Usuarios ---------- */
+const ROL_DESC = {
+  'Administrador': 'Acceso total: usuarios, configuración, rutas, reportes, excepciones y auditoría.',
+  'Operador': 'Registra, consulta y edita pedidos.',
+  'Responsable de bodega': 'Consulta pendientes y gestiona la preparación.',
+  'Despachador': 'Asigna rutas, despacha y registra entregas.',
+  'Consulta': 'Solo lectura (dashboard, pedidos, rutas y reportes).'
+};
+
+VIEWS.usuarios = async function () {
+  $('#topActions').innerHTML = '<button class="btn primary" id="btnUsr"><i data-lucide="user-plus"></i>Nuevo usuario</button>';
+  $('#btnUsr').onclick = () => openUsuarioForm();
+  try {
+    const list = await api('usuarios.list');
+    if (S.view !== 'usuarios') return;
+    S.usrList = list;
+    $('#view').innerHTML = `<div class="notice info"><i data-lucide="shield"></i><div>El acceso se valida con la cuenta de Google del usuario (mismo dominio de la organización). No se almacenan contraseñas. Los permisos se verifican en el servidor en cada operación.</div></div>
+      ${tableHTML([
+        { label: 'Nombre', render: (u) => `<b>${esc(u.nombre)}</b>${u.es_demo === 'SI' ? ' <span class="badge b-demo">DEMO</span>' : ''}` },
+        { label: 'Correo', key: 'correo' }, { label: 'Rol', render: (u) => `<span class="badge">${esc(u.rol)}</span>` },
+        { label: 'Estado', render: (u) => u.activo === 'SI' ? '<span class="badge b-ok">Activo</span>' : '<span class="badge b-anulado">Inactivo</span>' },
+        { label: 'Creado', render: (u) => fD(u.fecha_creacion) }
+      ], list, { rowAttr: (u) => `class="clickable" data-id="${esc(u.usuario_id)}"` })}
+      <div class="card section-gap"><h3><i data-lucide="key-round"></i>Perfiles y permisos</h3><ul class="help" style="margin:0">${Object.entries(ROL_DESC).map(([k, v]) => `<li><b>${esc(k)}:</b> ${esc(v)}</li>`).join('')}</ul></div>`;
+    $('#view').onclick = (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) openUsuarioForm(S.usrList.find((u) => u.usuario_id === tr.dataset.id)); };
+  } catch (e) { $('#view').innerHTML = errorHTML(e); }
+  icons();
+};
+
+function openUsuarioForm(u) {
+  u = u || { activo: 'SI', rol: 'Consulta' };
+  const m = openModal({ title: u.usuario_id ? 'Editar usuario' : 'Nuevo usuario', body: `<form id="uf" class="form-grid" autocomplete="off">
+    <div class="field span-3"><label>Nombre <span class="req">*</span></label><input name="nombre" maxlength="120" value="${esc(u.nombre)}"></div>
+    <div class="field span-3"><label>Correo de Google <span class="req">*</span></label><input type="email" name="correo" maxlength="120" value="${esc(u.correo)}"></div>
+    <div class="field span-3"><label>Rol</label><select name="rol">${options(S.cat.roles, u.rol)}</select><span class="help" id="ufDesc">${esc(ROL_DESC[u.rol])}</span></div>
+    <label class="check span-3"><input type="checkbox" name="activo" ${u.activo === 'SI' ? 'checked' : ''}> Usuario activo</label></form>`,
+    footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="ufOk"><i data-lucide="save"></i>Guardar</button>' });
+  const f = $('#uf', m.el).elements;
+  f.rol.onchange = () => { $('#ufDesc', m.el).textContent = ROL_DESC[f.rol.value]; };
+  $('#ufOk', m.el).onclick = async (e) => {
+    const data = { usuario_id: u.usuario_id || '', nombre: f.nombre.value.trim(), correo: f.correo.value.trim(), rol: f.rol.value, activo: f.activo.checked };
+    if (!data.nombre || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.correo)) return toast('Indique un nombre y un correo válido.', 'warn');
+    if (u.activo === 'SI' && !data.activo && !await confirmDialog({ title: 'Desactivar usuario', danger: true, message: `${esc(data.nombre)} perderá el acceso a la aplicación de inmediato.`, confirmText: 'Desactivar' })) return;
+    if (await run('usuarios.save', data, e.currentTarget, 'Usuario guardado.')) {
+      m.close();
+      try { const s = await api('session.get'); S.usuarios = s.catalogos.usuarios; } catch (err) { /* catálogo se refresca al recargar */ }
+      VIEWS.usuarios();
+    }
+  };
+}
+
+/* ---------- Auditoría ---------- */
+VIEWS.historial = function () {
+  S.hq = S.hq || { page: 1, pageSize: 25 };
+  $('#view').innerHTML = `<div class="card"><form id="hF" class="filters">
+      <div class="field" style="grid-column:span 2"><label>Buscar (referencia, acción, usuario u observación)</label><input name="q" value="${esc(S.hq.q || '')}"></div>
+      <div class="field"><label>Entidad</label><select name="entidad">${options(['Pedido', 'Ruta', 'Usuario', 'Producto', 'Configuracion'], S.hq.entidad, { empty: 'Todas' })}</select></div>
+      <div class="field"><label>Desde</label><input type="date" name="desde" value="${esc(S.hq.desde || '')}"></div>
+      <div class="field"><label>Hasta</label><input type="date" name="hasta" value="${esc(S.hq.hasta || '')}"></div>
+      <div><button class="btn primary"><i data-lucide="search"></i>Buscar</button></div></form></div><div id="hOut">${loadingHTML()}</div>`;
+  $('#hF').onsubmit = (e) => { e.preventDefault(); Object.assign(S.hq, Object.fromEntries(new FormData(e.target).entries()), { page: 1 }); loadHist(); };
+  $('#hOut').onclick = (e) => { const b = e.target.closest('[data-page]'); if (b && !b.disabled) { S.hq.page = Number(b.dataset.page); loadHist(); } };
+  loadHist();
+};
+async function loadHist() {
+  try {
+    const res = await api('historial.list', S.hq);
+    $('#hOut').innerHTML = res.total ? tableHTML([
+      { label: 'Fecha', cls: 'nowrap', render: (h) => fDT(h.fecha_evento) }, { label: 'Entidad', key: 'entidad' }, { label: 'Referencia', key: 'referencia' },
+      { label: 'Acción', render: (h) => esc(ACCIONES[h.accion] || h.accion) }, { label: 'Anterior', key: 'valor_anterior' }, { label: 'Nuevo', key: 'valor_nuevo' },
+      { label: 'Usuario', key: 'usuario' }, { label: 'Observación', key: 'observacion' }], res.items) + pagerHTML(res) : emptyHTML('No hay eventos para los filtros seleccionados.');
+  } catch (e) { $('#hOut').innerHTML = errorHTML(e); }
+  icons();
+}
+
+/* ---------- Configuración ---------- */
+VIEWS.config = async function () {
+  try {
+    const rows = await api('config.get');
+    if (S.view !== 'config') return;
+    const editables = rows.filter((r) => r.editable);
+    $('#view').innerHTML = `<div class="card"><form id="cfF" class="form-grid">
+      ${editables.map((r) => `<div class="field"><label>${esc(r.descripcion || r.clave)}</label>
+        ${['incluir_demo_en_reportes', 'modo_produccion'].includes(r.clave) ? `<select name="${esc(r.clave)}">${options(['SI', 'NO'], r.valor)}</select>`
+          : `<input name="${esc(r.clave)}" value="${esc(r.valor)}" ${/horas|seg$/.test(r.clave) ? 'type="number" min="0" step="any"' : ''}>`}
+        <span class="help">${esc(r.clave)}</span></div>`).join('')}
+      </form><div style="margin-top:12px"><button class="btn primary" id="cfOk"><i data-lucide="save"></i>Guardar configuración</button></div></div>
+      <div class="card"><h3>Parámetros del sistema (solo lectura)</h3>${rows.filter((r) => !r.editable).map((r) => `<p class="help"><b>${esc(r.clave)}</b>: ${esc(r.valor)} — ${esc(r.descripcion)}</p>`).join('')}</div>`;
+    $('#cfOk').onclick = async (e) => {
+      const data = Object.fromEntries(new FormData($('#cfF')).entries());
+      const r = await run('config.save', data, e.currentTarget);
+      if (r) {
+        toast(r.cambios ? `Configuración guardada (${r.cambios} cambio(s)).` : 'No había cambios.', 'ok');
+        if (data.nombre_empresa) { S.cfg.nombre_empresa = data.nombre_empresa; $('#brandName').textContent = data.nombre_empresa; }
+        if (data.intervalo_actualizacion_seg) S.cfg.intervalo_actualizacion_seg = Number(data.intervalo_actualizacion_seg);
+      }
+    };
+  } catch (e) { $('#view').innerHTML = errorHTML(e); }
+  icons();
+};
+</script>

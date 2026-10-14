@@ -1,0 +1,5 @@
+# Datos privados: no subir
+.clasp.json
+.claude/
+node_modules/
+*.log

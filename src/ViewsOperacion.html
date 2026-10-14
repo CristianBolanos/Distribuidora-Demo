@@ -1,0 +1,328 @@
+<script>
+'use strict';
+/* =====================================================================
+ * ViewsOperacion.html — Preparación, despacho/entregas y rutas.
+ * ===================================================================== */
+
+async function iniciarPreparacion(p, btn) {
+  if (!await confirmDialog({ title: 'Iniciar preparación', message: `El pedido <b>${esc(p.numero_pedido)}</b> pasará a <b>En preparación</b> y usted quedará como responsable del alistamiento.`, confirmText: 'Iniciar' })) return null;
+  return run('flujo.iniciarPreparacion', { pedido_id: p.pedido_id, version: p.version }, btn, 'Preparación iniciada.');
+}
+
+async function openAlistamiento(id, onDone) {
+  const m = openModal({ title: 'Registrar alistamiento', size: 'md', body: loadingHTML() });
+  let d;
+  try { d = await api('pedidos.get', { pedido_id: id }); } catch (e) { m.body.innerHTML = errorHTML(e); icons(); return; }
+  if (!m.el.isConnected) return;
+  const p = d.pedido;
+  m.el.querySelector('.modal-head h2').textContent = `Alistamiento · ${p.numero_pedido}`;
+  m.body.innerHTML = `
+    <div class="dl" style="margin-bottom:12px"><div><span>Cliente</span><b>${esc(p.cliente_nombre)}</b></div>
+      <div><span>Entrega estimada</span><b>${fD(p.fecha_estimada_entrega)}</b></div><div><span>Prioridad</span><b>${prioBadge(p.prioridad)}</b></div>
+      ${p.observaciones ? `<div style="grid-column:1/-1"><span>Observaciones</span><b>${esc(p.observaciones)}</b></div>` : ''}
+      ${p.observaciones_internas ? `<div style="grid-column:1/-1"><span>Observaciones internas</span><b>${esc(p.observaciones_internas)}</b></div>` : ''}</div>
+    <div class="table-wrap"><table class="t cards"><thead><tr><th>Producto</th><th class="num">Solicitado</th><th>Preparado</th><th></th></tr></thead><tbody>
+      ${d.detalles.map((x) => `<tr data-id="${esc(x.detalle_id)}"><td data-label="Producto"><b>${esc(x.sku)}</b> · ${esc(x.nombre_producto)}${x.observaciones ? `<br><span class="muted">${esc(x.observaciones)}</span>` : ''}</td>
+        <td class="num" data-label="Solicitado">${fNum(x.cantidad)}</td>
+        <td data-label="Preparado"><input type="number" min="0" max="${esc(x.cantidad)}" step="0.01" value="${esc(x.cantidad_preparada || 0)}" data-max="${esc(x.cantidad)}" style="max-width:110px"></td>
+        <td class="actions"><button type="button" class="btn sm" data-full>Completo</button></td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="field" style="margin-top:12px"><label>Observación del alistamiento</label><textarea id="alObs" maxlength="500"></textarea></div>
+    <p class="help">Guarde el avance cuantas veces necesite. Solo puede finalizar cuando todas las cantidades estén completas.</p>`;
+  const foot = document.createElement('div'); foot.className = 'modal-foot';
+  foot.innerHTML = `<button class="btn" data-close>Cancelar</button><button class="btn" id="alSave"><i data-lucide="save"></i>Guardar avance</button><button class="btn success" id="alFin"><i data-lucide="check"></i>Finalizar preparación</button>`;
+  m.el.querySelector('.modal').appendChild(foot);
+  m.body.onclick = (e) => { const b = e.target.closest('[data-full]'); if (b) { const i = b.closest('tr').querySelector('input'); i.value = i.dataset.max; } };
+  const send = async (finalizar, btn) => {
+    const lineas = [];
+    for (const tr of $$('tr[data-id]', m.el)) {
+      const i = tr.querySelector('input'); const v = Number(i.value);
+      if (i.value === '' || !(v >= 0) || v > Number(i.dataset.max)) { toast('Las cantidades preparadas deben estar entre 0 y lo solicitado.', 'warn'); i.focus(); return; }
+      lineas.push({ detalle_id: tr.dataset.id, cantidad_preparada: v });
+    }
+    if (finalizar && lineas.some((l, k) => l.cantidad_preparada < Number(d.detalles[k].cantidad))) return toast('Hay productos con cantidades pendientes; no se puede finalizar.', 'warn');
+    if (finalizar && !await confirmDialog({ title: 'Finalizar preparación', message: 'Se registrará que el pedido está completamente preparado y quedará listo para despacho.', confirmText: 'Finalizar' })) return;
+    const r = await run('flujo.registrarPreparacion', { pedido_id: p.pedido_id, version: p.version, lineas, finalizar, observacion: $('#alObs', m.el).value }, btn,
+      finalizar ? 'Preparación finalizada.' : 'Avance guardado.');
+    if (r) { m.close(); if (onDone) onDone(); }
+  };
+  $('#alSave', m.el).onclick = (e) => send(false, e.currentTarget);
+  $('#alFin', m.el).onclick = (e) => send(true, e.currentTarget);
+  icons();
+}
+
+async function openDespacho(id, onDone) {
+  const m = openModal({ title: 'Despachar pedido', size: 'md', body: loadingHTML() });
+  let d;
+  try { [d] = await Promise.all([api('pedidos.get', { pedido_id: id }), loadRutas(true)]); } catch (e) { m.body.innerHTML = errorHTML(e); icons(); return; }
+  if (!m.el.isConnected) return;
+  const p = d.pedido;
+  const preparado = !!p.fecha_fin_preparacion;
+  const rutaOk = d.ruta && ['planificada', 'activa'].includes(d.ruta.estado);
+  m.body.innerHTML = `
+    <p style="margin-top:0">Pedido <b>${esc(p.numero_pedido)}</b> · ${esc(p.cliente_nombre)} · ${esc(p.zona)}</p>
+    ${preparado ? '<div class="notice info"><i data-lucide="check-circle"></i><div>Preparación completa. El pedido puede despacharse.</div></div>'
+      : can('excepciones.autorizar') ? '<div class="notice warn"><i data-lucide="alert-triangle"></i><div>La preparación <b>no está finalizada</b>. Solo puede despacharse como excepción autorizada y justificada.</div></div>'
+      : '<div class="notice err"><i data-lucide="lock"></i><div>La preparación no está finalizada. Un responsable de bodega debe completarla o un administrador autorizar una excepción.</div></div>'}
+    <div class="field"><label>Ruta <span class="req">*</span></label><select id="dsRuta">${rutaOptions(rutaOk ? p.ruta_id : '', 'Seleccione una ruta…')}</select>
+      ${d.ruta && !rutaOk ? `<span class="help">La ruta actual (${esc(d.ruta.codigo_ruta)}) está ${esc(d.ruta.estado)}; seleccione otra.</span>` : ''}</div>
+    <div class="field" style="margin-top:10px"><label>Observación</label><textarea id="dsObs" maxlength="500"></textarea></div>
+    ${!preparado && can('excepciones.autorizar') ? `<label class="check" style="margin-top:10px"><input type="checkbox" id="dsExc"> Autorizo despachar sin preparación completa</label>
+      <div class="field" style="margin-top:8px"><label>Justificación de la excepción <span class="req">*</span></label><textarea id="dsJust" maxlength="500"></textarea></div>` : ''}`;
+  const foot = document.createElement('div'); foot.className = 'modal-foot';
+  foot.innerHTML = `<button class="btn" data-close>Cancelar</button>${preparado || can('excepciones.autorizar') ? '<button class="btn primary" id="dsOk"><i data-lucide="truck"></i>Confirmar despacho</button>' : ''}`;
+  m.el.querySelector('.modal').appendChild(foot);
+  const ok = $('#dsOk', m.el);
+  if (ok) ok.onclick = async (e) => {
+    const btn = e.currentTarget;
+    const rutaId = $('#dsRuta', m.el).value;
+    if (!rutaId) return toast('Seleccione la ruta de despacho.', 'warn');
+    const payload = { pedido_id: p.pedido_id, version: p.version, observacion: $('#dsObs', m.el).value };
+    if (!preparado) {
+      if (!$('#dsExc', m.el).checked) return toast('Marque la autorización de la excepción.', 'warn');
+      payload.excepcion = true; payload.justificacion = $('#dsJust', m.el).value.trim();
+      if (payload.justificacion.length < 10) return toast('La justificación debe tener al menos 10 caracteres.', 'warn');
+    }
+    if (rutaId !== p.ruta_id) {
+      const a = await run('rutas.asignar', { ruta_id: rutaId, pedido_ids: [p.pedido_id], versiones: { [p.pedido_id]: p.version } }, btn);
+      if (!a) return;
+      const v = a.asignados.find((x) => x.pedido_id === p.pedido_id);
+      if (v) { payload.version = v.version; p.version = v.version; p.ruta_id = rutaId; }
+    }
+    if (await run('flujo.despachar', payload, btn, 'Pedido despachado.')) { m.close(); if (onDone) onDone(); }
+  };
+  icons();
+}
+
+function openEntrega(p, onDone) {
+  const m = openModal({ title: `Registrar entrega · ${p.numero_pedido}`, body: `
+    <p style="margin-top:0">${esc(p.cliente_nombre)} · ${esc(p.direccion_entrega || '')}</p>
+    <div class="field"><label>Fecha y hora reales de entrega <span class="req">*</span></label><input type="datetime-local" id="enFecha" value="${nowBogLocal()}" max="${nowBogLocal()}"></div>
+    <div class="field" style="margin-top:10px"><label>Persona que recibe</label><input id="enRec" maxlength="120"></div>
+    <div class="field" style="margin-top:10px"><label>Observación del repartidor</label><textarea id="enObs" maxlength="500"></textarea></div>
+    <label class="check" style="margin-top:12px"><input type="checkbox" id="enConf"> Confirmo que la entrega fue realizada</label>
+    <p class="help">La evidencia fotográfica o firma digital no está disponible en esta versión.</p>`,
+    footer: '<button class="btn" data-close>Cancelar</button><button class="btn success" id="enOk"><i data-lucide="package-check"></i>Registrar entrega</button>' });
+  $('#enOk', m.el).onclick = async (e) => {
+    const fecha = $('#enFecha', m.el).value;
+    if (!fecha) return toast('Indique la fecha y hora de entrega.', 'warn');
+    if (fecha > nowBogLocal()) return toast('La fecha de entrega no puede ser futura.', 'warn');
+    if (!$('#enConf', m.el).checked) return toast('Debe confirmar que la entrega fue realizada.', 'warn');
+    const r = await run('flujo.registrarEntrega', { pedido_id: p.pedido_id, version: p.version, fecha_entrega: fecha, recibido_por: $('#enRec', m.el).value,
+      observacion_entrega: $('#enObs', m.el).value, confirmado: true }, e.currentTarget, 'Entrega registrada.');
+    if (r) { m.close(); if (onDone) onDone(); }
+  };
+}
+
+/* ---------- Listas operativas reutilizables ---------- */
+function opTable(items, acciones) {
+  return tableHTML([
+    { label: 'Número', render: (r) => `<a href="#" data-open="${esc(r.pedido_id)}"><b>${esc(r.numero_pedido)}</b></a>` },
+    { label: 'Cliente', render: (r) => esc(r.cliente_nombre) + `<br><span class="muted">${esc(r.zona)}</span>` },
+    { label: 'Ref. / unid.', cls: 'num', render: (r) => `${r.referencias} / ${fNum(r.unidades)}` },
+    { label: 'Prioridad', render: (r) => prioBadge(r.prioridad) },
+    { label: 'Entrega est.', cls: 'nowrap', render: (r) => fD(r.fecha_estimada_entrega) + (r.retrasado ? ' <span class="badge b-retraso">Retrasado</span>' : '') },
+    { label: 'Ruta', render: (r) => r.ruta_nombre ? esc(r.ruta_nombre) : '<span class="muted">Sin ruta</span>' },
+    { label: 'Responsable', render: (r) => esc(r.responsable_nombre) || '<span class="muted">—</span>' },
+    { label: '', cls: 'actions', render: acciones }
+  ], items);
+}
+
+async function opSection(boxId, filtro, acciones, vacio) {
+  const box = $('#' + boxId);
+  try {
+    const res = await api('pedidos.list', Object.assign({ pageSize: 100, sortBy: 'prioridad', sortDir: 'desc' }, filtro));
+    if (!box.isConnected) return;
+    box.innerHTML = res.items.length ? opTable(res.items, acciones) + (res.total > res.items.length ? `<p class="help">Se muestran ${res.items.length} de ${res.total}. Use el módulo Pedidos para ver el resto.</p>` : '') : emptyHTML(vacio, 'check-circle');
+    box._items = res.items;
+  } catch (e) { box.innerHTML = errorHTML(e); }
+  icons();
+}
+
+function bindOps(container, handlers) {
+  container.onclick = async (e) => {
+    const o = e.target.closest('[data-open]');
+    if (o) { e.preventDefault(); return openPedido(o.dataset.open); }
+    const b = e.target.closest('[data-op]'); if (!b) return;
+    const box = b.closest('[id]');
+    const item = (box._items || []).find((x) => x.pedido_id === b.dataset.id);
+    if (item && handlers[b.dataset.op]) handlers[b.dataset.op](item, b);
+  };
+}
+
+VIEWS.preparacion = function () {
+  $('#view').innerHTML = `
+    <div class="card"><h3><i data-lucide="clock"></i>Pedidos pendientes por preparar</h3><div id="opPend">${loadingHTML()}</div></div>
+    <div class="card"><h3><i data-lucide="clipboard-list"></i>En preparación</h3><div id="opPrep">${loadingHTML()}</div></div>`;
+  const reload = () => VIEWS.preparacion();
+  opSection('opPend', { estado: 'Pendiente' }, (r) => `<button class="btn sm warn" data-op="iniciar" data-id="${esc(r.pedido_id)}"><i data-lucide="play"></i>Iniciar</button>`, 'No hay pedidos pendientes.');
+  opSection('opPrep', { estado: 'En preparación' }, (r) => r.preparado ? '<span class="badge b-ok">Lista para despacho</span>'
+    : `<button class="btn sm" data-op="alistar" data-id="${esc(r.pedido_id)}"><i data-lucide="clipboard-check"></i>Alistar</button>`, 'No hay pedidos en preparación.');
+  bindOps($('#view'), {
+    iniciar: async (p, b) => { if (await iniciarPreparacion(p, b)) reload(); },
+    alistar: (p) => openAlistamiento(p.pedido_id, reload)
+  });
+};
+
+VIEWS.despacho = function () {
+  $('#view').innerHTML = `
+    <div class="card"><h3><i data-lucide="package-check"></i>Listos para despacho <span class="sub">(preparación completa)</span></h3><div id="opListos">${loadingHTML()}</div></div>
+    <div class="card"><h3><i data-lucide="truck"></i>En distribución <span class="sub">(despachados, pendientes de entrega)</span></h3><div id="opDesp">${loadingHTML()}</div></div>
+    ${can('excepciones.autorizar') ? `<div class="card"><h3><i data-lucide="alert-triangle"></i>En preparación sin finalizar <span class="sub">(solo despacho por excepción)</span></h3><div id="opExc">${loadingHTML()}</div></div>` : ''}`;
+  const reload = () => VIEWS.despacho();
+  const desp = (r) => `<button class="btn sm primary" data-op="despachar" data-id="${esc(r.pedido_id)}"><i data-lucide="truck"></i>Despachar</button>`;
+  opSection('opListos', { estado: 'En preparación', preparado: 'SI' }, desp, 'No hay pedidos listos para despacho.');
+  opSection('opDesp', { estado: 'Despachado' }, (r) => `<button class="btn sm success" data-op="entregar" data-id="${esc(r.pedido_id)}"><i data-lucide="package-check"></i>Entrega</button>`, 'No hay pedidos en distribución.');
+  if (can('excepciones.autorizar')) opSection('opExc', { estado: 'En preparación', preparado: 'NO' }, desp, 'No hay pedidos en esta situación.');
+  bindOps($('#view'), {
+    despachar: (p) => openDespacho(p.pedido_id, reload),
+    entregar: (p) => openEntrega(p, reload)
+  });
+};
+
+/* ---------- Rutas ---------- */
+VIEWS.rutas = async function () {
+  if (can('rutas.gestionar')) {
+    $('#topActions').innerHTML = '<button class="btn primary" id="btnRuta"><i data-lucide="plus"></i>Nueva ruta</button>';
+    $('#btnRuta').onclick = () => openRutaForm();
+  }
+  $('#view').innerHTML = `<div class="notice info"><i data-lucide="info"></i><div>La asignación de pedidos a rutas es manual. El sistema no calcula recorridos ni optimiza rutas geográficamente.</div></div>
+    <div class="toolbar"><div class="field"><label>Estado</label><select id="rtEstado">${options(S.cat.rutaEstados, S.rtEstado || '', { empty: 'Todos' })}</select></div></div><div id="rtTable">${loadingHTML()}</div>`;
+  $('#rtEstado').onchange = (e) => { S.rtEstado = e.target.value; VIEWS.rutas(); icons(); };
+  try {
+    const rutas = await api('rutas.list', { estado: S.rtEstado || '' });
+    if (S.view !== 'rutas') return;
+    $('#rtTable').innerHTML = rutas.length ? tableHTML([
+      { label: 'Código', render: (r) => `<b>${esc(r.codigo_ruta)}</b>${r.es_demo === 'SI' ? ' <span class="badge b-demo">DEMO</span>' : ''}` },
+      { label: 'Nombre', render: (r) => esc(r.nombre_ruta) + `<br><span class="muted">${esc(r.zona)}</span>` },
+      { label: 'Fecha', cls: 'nowrap', render: (r) => fD(r.fecha_operacion) },
+      { label: 'Responsable', render: (r) => esc(r.responsable_nombre) || '—' },
+      { label: 'Vehículo', render: (r) => esc(r.vehiculo) || '—' },
+      { label: 'Pedidos', cls: 'num', render: (r) => `${r.conteos.total}${r.capacidad ? ' / ' + esc(r.capacidad) : ''}` },
+      { label: 'Por despachar', cls: 'num', render: (r) => r.conteos['Pendiente'] + r.conteos['En preparación'] },
+      { label: 'Entregados', cls: 'num', render: (r) => r.conteos['Entregado'] },
+      { label: 'Estado', render: (r) => rutaEstadoBadge(r.estado) }
+    ], rutas, { rowAttr: (r) => `class="clickable" data-id="${esc(r.ruta_id)}"` }) : emptyHTML('No hay rutas registradas.', 'map');
+    $('#rtTable').onclick = (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) openRuta(tr.dataset.id); };
+  } catch (e) { $('#rtTable').innerHTML = errorHTML(e); }
+  icons();
+};
+
+function openRutaForm(r) {
+  r = r || { fecha_operacion: todayBog() };
+  const cerrada = r.ruta_id && ['finalizada', 'cancelada'].includes(r.estado);
+  const dis = cerrada ? 'disabled' : '';
+  const m = openModal({ title: r.ruta_id ? 'Editar ruta' : 'Nueva ruta', size: 'md', body: `
+    ${cerrada ? '<div class="notice warn"><i data-lucide="lock"></i><div>Ruta cerrada: solo se pueden editar las observaciones.</div></div>' : ''}
+    <form id="rf" class="form-grid" autocomplete="off">
+      <div class="field"><label>Código <span class="req">*</span></label><input name="codigo_ruta" maxlength="30" value="${esc(r.codigo_ruta)}" ${dis}></div>
+      <div class="field span-2"><label>Nombre <span class="req">*</span></label><input name="nombre_ruta" maxlength="100" value="${esc(r.nombre_ruta)}" ${dis}></div>
+      <div class="field span-2"><label>Ciudad o zona atendida <span class="req">*</span></label><input name="zona" maxlength="120" value="${esc(r.zona)}" ${dis}></div>
+      <div class="field"><label>Fecha de operación <span class="req">*</span></label><input type="date" name="fecha_operacion" value="${esc(r.fecha_operacion)}" ${dis}></div>
+      <div class="field span-2"><label>Responsable de distribución</label><select name="responsable_id" ${dis}>${userOptions(r.responsable_id, 'Sin asignar')}</select></div>
+      <div class="field"><label>Capacidad (pedidos)</label><input type="number" min="1" step="1" name="capacidad" value="${esc(r.capacidad)}" ${dis}></div>
+      <div class="field span-3"><label>Vehículo / medio de transporte</label><input name="vehiculo" maxlength="60" value="${esc(r.vehiculo)}" ${dis}></div>
+      <div class="field span-3"><label>Descripción</label><textarea name="descripcion" maxlength="500" ${dis}>${esc(r.descripcion)}</textarea></div>
+      <div class="field span-3"><label>Observaciones</label><textarea name="observaciones" maxlength="1000">${esc(r.observaciones)}</textarea></div>
+    </form>`, footer: '<button class="btn" data-close>Cancelar</button><button class="btn primary" id="rfOk"><i data-lucide="save"></i>Guardar</button>' });
+  $('#rfOk', m.el).onclick = async (e) => {
+    const f = $('#rf', m.el).elements;
+    const data = { ruta_id: r.ruta_id || '' };
+    ['codigo_ruta', 'nombre_ruta', 'zona', 'fecha_operacion', 'responsable_id', 'capacidad', 'vehiculo', 'descripcion', 'observaciones'].forEach((k) => { data[k] = f[k].value.trim(); });
+    if (!cerrada && (!data.codigo_ruta || !data.nombre_ruta || !data.zona || !data.fecha_operacion)) return toast('Complete los campos obligatorios.', 'warn');
+    if (data.capacidad && !(Number(data.capacidad) >= 1 && Number.isInteger(Number(data.capacidad)))) return toast('La capacidad debe ser un entero mayor que cero.', 'warn');
+    const res = await run('rutas.save', data, e.currentTarget, 'Ruta guardada.');
+    if (res) { m.close(); S.rutas = null; if (S.view === 'rutas') VIEWS.rutas(); if (r.ruta_id) openRuta(r.ruta_id); }
+  };
+}
+
+async function openRuta(id) {
+  const m = openModal({ title: 'Ruta', size: 'lg', body: loadingHTML() });
+  let d;
+  try { d = await api('rutas.get', { ruta_id: id }); } catch (e) { m.body.innerHTML = errorHTML(e); icons(); return; }
+  if (!m.el.isConnected) return;
+  const r = d.ruta, c = d.conteos;
+  const abierta = ['planificada', 'activa'].includes(r.estado);
+  m.el.querySelector('.modal-head h2').textContent = `Ruta ${r.codigo_ruta} · ${r.nombre_ruta}`;
+  m.body.innerHTML = `
+    <div style="margin-bottom:12px">${rutaEstadoBadge(r.estado)}</div>
+    <div class="dl"><div><span>Zona</span><b>${esc(r.zona)}</b></div><div><span>Fecha de operación</span><b>${fD(r.fecha_operacion)}</b></div>
+      <div><span>Responsable</span><b>${esc(r.responsable_nombre) || '—'}</b></div><div><span>Vehículo</span><b>${esc(r.vehiculo) || '—'}</b></div>
+      <div><span>Capacidad</span><b>${esc(r.capacidad) || 'Sin límite'}</b></div><div><span>Pedidos</span><b>${c.total} (pend. ${c['Pendiente']}, prep. ${c['En preparación']}, desp. ${c['Despachado']}, entr. ${c['Entregado']})</b></div>
+      ${r.descripcion ? `<div style="grid-column:1/-1"><span>Descripción</span><b>${esc(r.descripcion)}</b></div>` : ''}
+      ${r.observaciones ? `<div style="grid-column:1/-1"><span>Observaciones</span><b>${esc(r.observaciones)}</b></div>` : ''}</div>
+    <div class="form-section">Pedidos asociados</div>
+    <div id="rtPeds">${d.pedidos.length ? tableHTML([
+      { label: 'Número', render: (x) => `<a href="#" data-open="${esc(x.pedido_id)}"><b>${esc(x.numero_pedido)}</b></a>` },
+      { label: 'Cliente', render: (x) => esc(x.cliente_nombre) + `<br><span class="muted">${esc(x.direccion_entrega)}, ${esc(x.zona)}</span>` },
+      { label: 'Unid.', cls: 'num', render: (x) => fNum(x.unidades) },
+      { label: 'Estado', render: (x) => estadoBadge(x.estado) + (x.preparado && x.estado === 'En preparación' ? ' <span class="badge b-ok">Lista</span>' : '') + (x.retrasado ? ' <span class="badge b-retraso">Retrasado</span>' : '') },
+      { label: 'Entrega est.', render: (x) => fD(x.fecha_estimada_entrega) },
+      { label: '', cls: 'actions', render: (x) => can('rutas.asignar') && ['Pendiente', 'En preparación'].includes(x.estado) ? `<button class="btn sm" data-ret="${esc(x.pedido_id)}"><i data-lucide="x"></i>Retirar</button>` : '' }
+    ], d.pedidos) : emptyHTML('La ruta no tiene pedidos asignados.')}</div>
+    ${d.pendientesDespacho.length ? `<p class="help">${d.pendientesDespacho.length} pedido(s) pendientes de despacho en esta ruta.</p>` : ''}`;
+  const btns = [];
+  if (can('rutas.gestionar')) btns.push('<button class="btn" data-a="edit"><i data-lucide="pencil"></i>Editar</button>');
+  if (abierta && can('rutas.asignar')) btns.push('<button class="btn primary" data-a="asignar"><i data-lucide="plus"></i>Asignar pedidos</button>');
+  if (r.estado === 'planificada' && can('rutas.asignar')) btns.push('<button class="btn" data-a="activa"><i data-lucide="play"></i>Activar</button>');
+  if (r.estado === 'activa' && can('rutas.asignar')) btns.push('<button class="btn success" data-a="finalizada"><i data-lucide="flag"></i>Finalizar jornada</button>');
+  if (abierta && can('rutas.gestionar')) btns.push('<button class="btn danger" data-a="cancelada"><i data-lucide="x-circle"></i>Cancelar ruta</button>');
+  const foot = document.createElement('div'); foot.className = 'modal-foot'; foot.innerHTML = btns.join('') || '<button class="btn" data-close>Cerrar</button>';
+  m.el.querySelector('.modal').appendChild(foot);
+  const reload = () => { m.close(); S.rutas = null; if (S.view === 'rutas') VIEWS.rutas(); openRuta(id); };
+  m.body.onclick = async (e) => {
+    const o = e.target.closest('[data-open]'); if (o) { e.preventDefault(); return openPedido(o.dataset.open); }
+    const b = e.target.closest('[data-ret]'); if (!b) return;
+    const x = d.pedidos.find((p) => p.pedido_id === b.dataset.ret);
+    if (!await confirmDialog({ title: 'Retirar de la ruta', message: `El pedido <b>${esc(x.numero_pedido)}</b> quedará sin ruta asignada. Su estado no cambia.`, confirmText: 'Retirar' })) return;
+    if (await run('rutas.retirar', { pedido_id: x.pedido_id, version: x.version }, b, 'Pedido retirado de la ruta.')) reload();
+  };
+  foot.onclick = async (e) => {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const a = b.dataset.a;
+    if (a === 'edit') { m.close(); return openRutaForm(r); }
+    if (a === 'asignar') return openAsignar(r, reload);
+    const msgs = {
+      activa: 'La ruta pasará a <b>activa</b>.',
+      finalizada: `Se finalizará la jornada. Los pedidos no despachados (${c['Pendiente'] + c['En preparación']}) se liberarán para reasignarlos; los despachados (${c['Despachado']}) conservan la ruta hasta registrar su entrega. <b>No se cambia el estado de ningún pedido.</b>`,
+      cancelada: 'La ruta se cancelará y sus pedidos no despachados quedarán sin ruta. No es posible si hay pedidos en distribución.'
+    };
+    const res = await confirmDialog({ title: 'Cambiar estado de la ruta', message: msgs[a], danger: a === 'cancelada', confirmText: 'Confirmar',
+      input: { label: a === 'cancelada' ? 'Motivo de la cancelación' : 'Observación (opcional)', required: a === 'cancelada', min: a === 'cancelada' ? 10 : 0 } });
+    if (res === false) return;
+    const out = await run('rutas.cambiarEstado', { ruta_id: r.ruta_id, estado: a, observacion: res }, b, 'Estado de la ruta actualizado.');
+    if (out) { if (out.despachadosSinEntrega) toast(`${out.despachadosSinEntrega} pedido(s) siguen despachados sin entrega registrada.`, 'warn'); reload(); }
+  };
+  icons();
+}
+
+async function openAsignar(r, onDone) {
+  const m = openModal({ title: `Asignar pedidos a ${r.codigo_ruta}`, size: 'lg', body: loadingHTML() });
+  let res;
+  try { res = await api('pedidos.list', { ruta_id: '__none', pageSize: 100, sortBy: 'prioridad', sortDir: 'desc' }); } catch (e) { m.body.innerHTML = errorHTML(e); icons(); return; }
+  const items = res.items.filter((x) => ['Pendiente', 'En preparación'].includes(x.estado));
+  m.body.innerHTML = `<div class="toolbar"><div class="field grow"><label>Filtrar por cliente, zona o número</label><input id="asQ"></div></div>
+    <div id="asList">${items.length ? tableHTML([
+      { label: '', render: (x) => `<input type="checkbox" value="${esc(x.pedido_id)}">` },
+      { label: 'Número', render: (x) => `<b>${esc(x.numero_pedido)}</b>` },
+      { label: 'Cliente', render: (x) => esc(x.cliente_nombre) },
+      { label: 'Zona', render: (x) => esc(x.zona) + ', ' + esc(x.ciudad) },
+      { label: 'Estado', render: (x) => estadoBadge(x.estado) },
+      { label: 'Prioridad', render: (x) => prioBadge(x.prioridad) },
+      { label: 'Entrega est.', render: (x) => fD(x.fecha_estimada_entrega) }
+    ], items, { rowAttr: (x) => `data-s="${esc((x.numero_pedido + ' ' + x.cliente_nombre + ' ' + x.zona).toLowerCase())}"` }) : emptyHTML('No hay pedidos pendientes o en preparación sin ruta.')}</div>`;
+  const foot = document.createElement('div'); foot.className = 'modal-foot';
+  foot.innerHTML = `<button class="btn" data-close>Cancelar</button><button class="btn primary" id="asOk"><i data-lucide="check"></i>Asignar seleccionados</button>`;
+  m.el.querySelector('.modal').appendChild(foot);
+  const q = $('#asQ', m.el);
+  q.oninput = () => { const t = q.value.toLowerCase(); $$('tr[data-s]', m.el).forEach((tr) => { tr.style.display = tr.dataset.s.includes(t) ? '' : 'none'; }); };
+  $('#asOk', m.el).onclick = async (e) => {
+    const ids = $$('input[type=checkbox]:checked', m.el).map((x) => x.value);
+    if (!ids.length) return toast('Seleccione al menos un pedido.', 'warn');
+    const versiones = {}; items.forEach((x) => { if (ids.includes(x.pedido_id)) versiones[x.pedido_id] = x.version; });
+    const out = await run('rutas.asignar', { ruta_id: r.ruta_id, pedido_ids: ids, versiones }, e.currentTarget, `${ids.length} pedido(s) asignado(s).`);
+    if (out) { m.close(); onDone(); }
+  };
+  icons();
+}
+</script>

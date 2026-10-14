@@ -1,0 +1,386 @@
+<script>
+'use strict';
+/* =====================================================================
+ * ViewsPedidos.html — Listado, formulario, detalle/seguimiento e impresión de pedidos.
+ * ===================================================================== */
+
+VIEWS.pedidos = async function () {
+  if (can('pedidos.crear')) {
+    $('#topActions').innerHTML = `<button class="btn primary" id="btnNuevo"><i data-lucide="plus"></i>Nuevo pedido</button>`;
+    $('#btnNuevo').onclick = () => openPedidoForm();
+  }
+  const q = S.pq;
+  $('#view').innerHTML = `
+    <div class="card">
+      <form id="fPed" class="filters" autocomplete="off">
+        <div class="field" style="grid-column:span 2"><label>Buscar (número, cliente o documento)</label><input name="q" value="${esc(q.q || '')}" placeholder="PED-000123 o nombre del cliente"></div>
+        <div class="field"><label>Estado</label><select name="estado">${options(S.cat.estados, q.estado, { empty: 'Todos' })}</select></div>
+        <div class="field"><label>Prioridad</label><select name="prioridad">${options(S.cat.prioridades, q.prioridad, { empty: 'Todas' })}</select></div>
+        <div class="field"><label>Creado desde</label><input type="date" name="desde" value="${esc(q.desde || '')}"></div>
+        <div class="field"><label>Creado hasta</label><input type="date" name="hasta" value="${esc(q.hasta || '')}"></div>
+        <div class="field"><label>Ruta</label><select name="ruta_id" id="fRuta"><option value="">Todas</option></select></div>
+        <div class="field"><label>Responsable</label><select name="responsable_id">${options([{ usuario_id: '__none', nombre: 'Sin responsable' }].concat(S.usuarios), q.responsable_id, { empty: 'Todos', key: (u) => u.usuario_id, label: (u) => u.nombre })}</select></div>
+        <label class="check"><input type="checkbox" name="retrasados" ${q.retrasados ? 'checked' : ''}> Solo retrasados</label>
+        <label class="check"><input type="checkbox" name="incluirAnulados" ${q.incluirAnulados ? 'checked' : ''}> Incluir anulados</label>
+        <div style="display:flex;gap:8px"><button class="btn primary" type="submit"><i data-lucide="search"></i>Buscar</button>
+        <button class="btn" type="button" id="fReset"><i data-lucide="rotate-ccw"></i>Restablecer</button></div>
+      </form>
+    </div>
+    <div id="pedTable">${loadingHTML()}</div>`;
+  $('#fPed').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    if (fd.get('desde') && fd.get('hasta') && fd.get('desde') > fd.get('hasta')) return toast('La fecha inicial no puede ser posterior a la final.', 'warn');
+    Object.assign(S.pq, { q: fd.get('q').trim(), estado: fd.get('estado'), prioridad: fd.get('prioridad'), desde: fd.get('desde'), hasta: fd.get('hasta'),
+      ruta_id: fd.get('ruta_id'), responsable_id: fd.get('responsable_id'), retrasados: !!fd.get('retrasados'), incluirAnulados: !!fd.get('incluirAnulados'), page: 1 });
+    loadPedidos();
+  };
+  $('#fReset').onclick = () => { S.pq = { page: 1, pageSize: 20, sortBy: 'fecha_creacion', sortDir: 'desc' }; VIEWS.pedidos(); icons(); };
+  $('#pedTable').onclick = (e) => {
+    const s = e.target.closest('[data-sort]');
+    if (s) { S.pq.sortDir = S.pq.sortBy === s.dataset.sort && S.pq.sortDir === 'desc' ? 'asc' : 'desc'; S.pq.sortBy = s.dataset.sort; S.pq.page = 1; return loadPedidos(); }
+    const pg = e.target.closest('[data-page]');
+    if (pg && !pg.disabled) { S.pq.page = Number(pg.dataset.page); return loadPedidos(); }
+    const act = e.target.closest('[data-act]');
+    if (act) { e.stopPropagation(); const id = act.dataset.id; if (act.dataset.act === 'edit') openPedidoForm(id); if (act.dataset.act === 'view') openPedido(id); return; }
+    const row = e.target.closest('tr[data-id]');
+    if (row) openPedido(row.dataset.id);
+  };
+  loadPedidos();
+  try {
+    await loadRutas();
+    const sel = $('#fRuta');
+    if (sel) sel.innerHTML = options([{ ruta_id: '__none', codigo_ruta: 'Sin ruta', nombre_ruta: '' }].concat(S.rutas), S.pq.ruta_id,
+      { empty: 'Todas', key: (r) => r.ruta_id, label: (r) => r.nombre_ruta ? `${r.codigo_ruta} · ${r.nombre_ruta}` : r.codigo_ruta });
+  } catch (e) { /* el filtro de ruta queda en "Todas" */ }
+};
+
+async function loadPedidos() {
+  const box = $('#pedTable'); if (!box) return;
+  box.style.opacity = '.6';
+  try {
+    const res = await api('pedidos.list', S.pq);
+    if (S.view !== 'pedidos') return;
+    S.pq.page = res.page;
+    const cols = [
+      { label: 'Número', sort: 'numero_pedido', cls: 'nowrap', render: (r) => `<b>${esc(r.numero_pedido)}</b>${r.es_demo ? ' <span class="badge b-demo">DEMO</span>' : ''}` },
+      { label: 'Creación', sort: 'fecha_creacion', cls: 'nowrap', render: (r) => fDT(r.fecha_creacion) },
+      { label: 'Cliente', sort: 'cliente_nombre', render: (r) => esc(r.cliente_nombre) },
+      { label: 'Dirección / zona', sort: 'zona', render: (r) => `${esc(r.direccion_entrega)}<br><span class="muted">${esc(r.zona)}, ${esc(r.ciudad)}</span>` },
+      { label: 'Ref. / unid.', sort: 'unidades', cls: 'num', render: (r) => `${r.referencias} / ${fNum(r.unidades)}` },
+      { label: 'Estado', sort: 'estado', render: (r) => estadoBadge(r.estado, r.anulado) + (r.retrasado ? ' <span class="badge b-retraso">Retrasado</span>' : '') },
+      { label: 'Prioridad', sort: 'prioridad', render: (r) => prioBadge(r.prioridad) },
+      { label: 'Ruta', sort: 'ruta_nombre', render: (r) => r.ruta_nombre ? esc(r.ruta_nombre) : '<span class="muted">Sin ruta</span>' },
+      { label: 'Responsable', sort: 'responsable_nombre', render: (r) => r.responsable_nombre ? esc(r.responsable_nombre) : '<span class="muted">Sin asignar</span>' },
+      { label: 'Entrega est.', sort: 'fecha_estimada_entrega', cls: 'nowrap', render: (r) => fD(r.fecha_estimada_entrega) },
+      { label: 'Actualizado', sort: 'fecha_actualizacion', cls: 'nowrap', render: (r) => fDT(r.fecha_actualizacion) },
+      { label: '', cls: 'actions', render: (r) => `<div class="actions"><button class="icon-btn" title="Ver detalle" data-act="view" data-id="${esc(r.pedido_id)}"><i data-lucide="eye"></i></button>
+        ${can('pedidos.editar') && !r.anulado && r.estado !== 'Entregado' ? `<button class="icon-btn" title="Editar" data-act="edit" data-id="${esc(r.pedido_id)}"><i data-lucide="pencil"></i></button>` : ''}</div>` }
+    ];
+    box.innerHTML = res.total
+      ? tableHTML(cols, res.items, { sort: { by: S.pq.sortBy, dir: S.pq.sortDir }, rowAttr: (r) => `class="clickable ${r.anulado ? 'muted' : ''}" data-id="${esc(r.pedido_id)}"` }) + pagerHTML(res)
+      : emptyHTML('No se encontraron pedidos con los filtros aplicados.', 'search-x');
+  } catch (e) {
+    box.innerHTML = errorHTML(e);
+  } finally { box.style.opacity = ''; icons(); }
+}
+
+/* ---------- Formulario de creación / edición ---------- */
+async function openPedidoForm(id) {
+  const m = openModal({ title: id ? 'Editar pedido' : 'Nuevo pedido', size: 'lg', body: loadingHTML() });
+  let det = null;
+  try {
+    const tasks = [loadProductos()];
+    if (can('rutas.asignar')) tasks.push(loadRutas(true));
+    if (id) tasks.push(api('pedidos.get', { pedido_id: id }).then((d) => { det = d; }));
+    await Promise.all(tasks);
+  } catch (e) { m.body.innerHTML = errorHTML(e); icons(); return; }
+  if (!m.el.isConnected) return;
+  const p = det ? det.pedido : { prioridad: 'normal', fecha_estimada_entrega: '', estado: 'Pendiente' };
+  const editables = det ? det.editables : null;
+  if (det && !editables.length) { m.body.innerHTML = emptyHTML('El estado actual del pedido no permite modificarlo.', 'lock'); icons(); return; }
+  const lineasEditables = det ? det.lineasEditables : true;
+  const dis = (k) => (editables && !editables.includes(k)) ? 'disabled' : '';
+  let lineas = det ? det.detalles.map((d) => ({ producto_id: d.producto_id, nombre: d.nombre_producto, sku: d.sku, cantidad: d.cantidad, precio_unitario: d.precio_unitario, observaciones: d.observaciones }))
+    : [{ producto_id: '', cantidad: 1, precio_unitario: '', observaciones: '' }];
+  const lineasOrig = JSON.stringify(lineas.map((l) => [l.producto_id, Number(l.cantidad), l.precio_unitario === '' ? '' : Number(l.precio_unitario), l.observaciones || '']));
+  const prodActivos = S.productos.filter((x) => x.activo === 'SI');
+  const puedeRuta = can('rutas.asignar') && (!det || ['Pendiente', 'En preparación'].includes(p.estado));
+
+  m.body.innerHTML = `
+    <form id="pf" autocomplete="off" novalidate>
+      ${det ? `<div class="notice info"><i data-lucide="info"></i><div>Pedido <b>${esc(p.numero_pedido)}</b> · creado el ${fDT(p.fecha_creacion)} · estado ${estadoBadge(p.estado)}</div></div>`
+            : `<div class="notice info"><i data-lucide="info"></i><div>El número de pedido y la fecha de creación se asignan automáticamente. Todo pedido nuevo inicia en estado <b>Pendiente</b>.</div></div>`}
+      <div class="form-section">Cliente</div>
+      <div class="form-grid">
+        <div class="field span-2"><label>Nombre o razón social <span class="req">*</span></label><input name="cliente_nombre" maxlength="150" required value="${esc(p.cliente_nombre)}" ${dis('cliente_nombre')}></div>
+        <div class="field"><label>Documento / NIT</label><input name="cliente_documento" maxlength="30" value="${esc(p.cliente_documento)}" ${dis('cliente_documento')}></div>
+        <div class="field"><label>Teléfono <span class="req">*</span></label><input name="cliente_telefono" maxlength="30" required value="${esc(p.cliente_telefono)}" ${dis('cliente_telefono')}></div>
+        <div class="field span-2"><label>Correo electrónico</label><input type="email" name="cliente_correo" maxlength="120" value="${esc(p.cliente_correo)}" ${dis('cliente_correo')}></div>
+      </div>
+      <div class="form-section">Entrega</div>
+      <div class="form-grid">
+        <div class="field span-3"><label>Dirección de entrega <span class="req">*</span></label><input name="direccion_entrega" maxlength="250" required value="${esc(p.direccion_entrega)}" ${dis('direccion_entrega')}></div>
+        <div class="field"><label>Ciudad o municipio <span class="req">*</span></label><input name="ciudad" maxlength="80" required value="${esc(p.ciudad)}" ${dis('ciudad')}></div>
+        <div class="field"><label>Barrio o zona <span class="req">*</span></label><input name="zona" maxlength="80" required value="${esc(p.zona)}" ${dis('zona')}></div>
+        <div class="field"><label>Fecha estimada de entrega <span class="req">*</span></label><input type="date" name="fecha_estimada_entrega" required min="${det ? '' : todayBog()}" value="${esc(p.fecha_estimada_entrega)}" ${dis('fecha_estimada_entrega')}></div>
+        <div class="field"><label>Prioridad</label><select name="prioridad" ${dis('prioridad')}>${options(S.cat.prioridades, p.prioridad, { label: (x) => x.charAt(0).toUpperCase() + x.slice(1) })}</select></div>
+        <div class="field"><label>Responsable asignado</label><select name="responsable_id" ${dis('responsable_id')}>${userOptions(p.responsable_id)}</select></div>
+        <div class="field"><label>Ruta asignada</label><select name="ruta_id" ${puedeRuta ? '' : 'disabled'}>${rutaOptions(p.ruta_id)}</select>
+          ${puedeRuta ? '' : `<span class="help">${can('rutas.asignar') ? 'No se puede cambiar en el estado actual.' : 'La asigna un despachador o administrador.'}</span>`}</div>
+        <div class="field span-3"><label>Observaciones</label><textarea name="observaciones" maxlength="1000" ${dis('observaciones')}>${esc(p.observaciones)}</textarea></div>
+        <div class="field span-3"><label>Observaciones internas (logística)</label><textarea name="observaciones_internas" maxlength="1000" ${dis('observaciones_internas')}>${esc(p.observaciones_internas)}</textarea></div>
+      </div>
+      <div class="form-section">Productos solicitados</div>
+      ${lineasEditables ? '' : '<div class="notice warn"><i data-lucide="lock"></i><div>Los productos solo se pueden modificar mientras el pedido está Pendiente.</div></div>'}
+      <div id="lineas"></div>
+      ${lineasEditables ? '<button type="button" class="btn sm" id="addLinea"><i data-lucide="plus"></i>Agregar producto</button>' : ''}
+      ${prodActivos.length ? '' : '<div class="notice err"><i data-lucide="alert-circle"></i><div>No hay productos activos en el catálogo. Un administrador debe registrarlos primero.</div></div>'}
+      ${det ? '<div class="field" style="margin-top:12px"><label>Motivo del cambio (opcional, queda en el historial)</label><input name="motivo" maxlength="500"></div>' : ''}
+    </form>`;
+  const foot = document.createElement('div');
+  foot.className = 'modal-foot';
+  foot.innerHTML = `<button class="btn" data-close>Cancelar</button><button class="btn primary" id="pfSave"><i data-lucide="save"></i>${det ? 'Guardar cambios' : 'Registrar pedido'}</button>`;
+  m.el.querySelector('.modal').appendChild(foot);
+
+  const renderLineas = () => {
+    const ro = !lineasEditables;
+    const total = lineas.reduce((a, l) => a + (l.precio_unitario !== '' && l.precio_unitario !== null ? Number(l.precio_unitario) * Number(l.cantidad || 0) : 0), 0);
+    const hayPrecio = lineas.some((l) => l.precio_unitario !== '' && l.precio_unitario !== null);
+    $('#lineas', m.el).innerHTML = `<div class="table-wrap"><table class="t cards"><thead><tr><th>Producto</th><th>Cantidad</th><th>Precio unit. (opcional)</th><th class="num">Subtotal</th><th>Observación</th><th></th></tr></thead><tbody>
+      ${lineas.map((l, i) => `<tr data-i="${i}">
+        <td data-label="Producto">${ro ? esc(`${l.sku} · ${l.nombre}`) : `<select data-f="producto_id"><option value="">Seleccione…</option>${options(prodActivos.concat(prodActivos.some((x) => x.producto_id === l.producto_id) || !l.producto_id ? [] : [{ producto_id: l.producto_id, sku: l.sku, nombre: l.nombre + ' (inactivo)', unidad_medida: '' }]), l.producto_id, { key: (x) => x.producto_id, label: (x) => `${x.sku} · ${x.nombre}${x.unidad_medida ? ' (' + x.unidad_medida + ')' : ''}` })}</select>`}</td>
+        <td data-label="Cantidad"><input type="number" min="0.01" step="0.01" data-f="cantidad" value="${esc(l.cantidad)}" ${ro ? 'disabled' : ''} style="max-width:110px"></td>
+        <td data-label="Precio unit."><input type="number" min="0" step="1" data-f="precio_unitario" value="${esc(l.precio_unitario)}" ${ro ? 'disabled' : ''} style="max-width:140px"></td>
+        <td class="num" data-label="Subtotal">${l.precio_unitario !== '' && l.precio_unitario !== null ? fCOP(Number(l.precio_unitario) * Number(l.cantidad || 0)) : '—'}</td>
+        <td data-label="Observación"><input data-f="observaciones" maxlength="300" value="${esc(l.observaciones)}" ${ro ? 'disabled' : ''}></td>
+        <td class="actions">${ro ? '' : `<button type="button" class="icon-btn" data-del="${i}" title="Eliminar línea"><i data-lucide="trash-2"></i></button>`}</td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="lines-total">${lineas.length} línea(s) · ${fNum(lineas.reduce((a, l) => a + Number(l.cantidad || 0), 0))} unidades${hayPrecio ? ' · Total ' + fCOP(total) : ''}</div>`;
+    icons();
+  };
+  renderLineas();
+  const lbox = $('#lineas', m.el);
+  lbox.addEventListener('change', (e) => {
+    const tr = e.target.closest('tr[data-i]'); if (!tr) return;
+    const l = lineas[Number(tr.dataset.i)]; const f = e.target.dataset.f;
+    l[f] = e.target.value;
+    if (f === 'producto_id') {
+      const pr = S.productos.find((x) => x.producto_id === l.producto_id);
+      if (pr) { l.sku = pr.sku; l.nombre = pr.nombre; if (l.precio_unitario === '' && pr.precio_referencia !== '') l.precio_unitario = pr.precio_referencia; }
+    }
+    renderLineas();
+  });
+  lbox.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-del]'); if (!b) return;
+    if (lineas.length === 1) return toast('El pedido debe tener al menos un producto.', 'warn');
+    lineas.splice(Number(b.dataset.del), 1); renderLineas();
+  });
+  const add = $('#addLinea', m.el);
+  if (add) add.onclick = () => { lineas.push({ producto_id: '', cantidad: 1, precio_unitario: '', observaciones: '' }); renderLineas(); };
+
+  $('#pfSave', m.el).onclick = async (ev) => {
+    const form = $('#pf', m.el);
+    const fd = new FormData(form);
+    const data = {};
+    ['cliente_nombre', 'cliente_documento', 'cliente_telefono', 'cliente_correo', 'direccion_entrega', 'ciudad', 'zona', 'fecha_estimada_entrega',
+      'prioridad', 'responsable_id', 'observaciones', 'observaciones_internas'].forEach((k) => { data[k] = form.elements[k].value.trim(); });
+    // Validación en el cliente (el servidor vuelve a validar todo).
+    const req = [['cliente_nombre', 'Cliente'], ['cliente_telefono', 'Teléfono'], ['direccion_entrega', 'Dirección'], ['ciudad', 'Ciudad'], ['zona', 'Barrio o zona'], ['fecha_estimada_entrega', 'Fecha estimada de entrega']];
+    const falta = req.find(([k]) => !data[k]);
+    if (falta) { toast(`El campo "${falta[1]}" es obligatorio.`, 'warn'); form.elements[falta[0]].focus(); return; }
+    if (data.cliente_correo && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.cliente_correo)) return toast('El correo electrónico no es válido.', 'warn');
+    if (!det && data.fecha_estimada_entrega < todayBog()) return toast('La fecha estimada de entrega no puede ser anterior a hoy.', 'warn');
+    if (lineasEditables) {
+      for (let i = 0; i < lineas.length; i++) {
+        const l = lineas[i];
+        if (!l.producto_id) return toast(`Seleccione el producto de la línea ${i + 1}.`, 'warn');
+        if (!(Number(l.cantidad) > 0)) return toast(`La cantidad de la línea ${i + 1} debe ser mayor que cero.`, 'warn');
+        if (l.precio_unitario !== '' && l.precio_unitario !== null && !(Number(l.precio_unitario) >= 0)) return toast(`El precio de la línea ${i + 1} no es válido.`, 'warn');
+      }
+    }
+    const lineasPayload = lineas.map((l) => ({ producto_id: l.producto_id, cantidad: l.cantidad, precio_unitario: l.precio_unitario, observaciones: l.observaciones }));
+    const lineasNow = JSON.stringify(lineas.map((l) => [l.producto_id, Number(l.cantidad), l.precio_unitario === '' || l.precio_unitario === null ? '' : Number(l.precio_unitario), l.observaciones || '']));
+    if (puedeRuta) data.ruta_id = form.elements.ruta_id.value;
+    let r;
+    if (det) {
+      Object.assign(data, { pedido_id: det.pedido.pedido_id, version: det.pedido.version, motivo: fd.get('motivo') || '' });
+      if (lineasEditables && lineasNow !== lineasOrig) { data.lineasModificadas = true; data.lineas = lineasPayload; }
+      r = await run('pedidos.update', data, ev.currentTarget);
+      if (r) toast(r.sinCambios ? 'No había cambios para guardar.' : 'Pedido actualizado.', 'ok');
+    } else {
+      data.lineas = lineasPayload;
+      r = await run('pedidos.create', data, ev.currentTarget);
+      if (r) toast(`Pedido ${r.numero_pedido} registrado.`, 'ok');
+    }
+    if (r) { m.close(); refreshCurrent(); if (!det) openPedido(r.pedido_id); }
+  };
+  icons();
+}
+
+function refreshCurrent() {
+  if (S.view === 'pedidos') loadPedidos();
+  else if (S.view === 'dashboard') loadDashboard(true);
+  else if (VIEWS[S.view] && ['preparacion', 'despacho', 'rutas'].includes(S.view)) VIEWS[S.view]();
+}
+
+/* ---------- Detalle y seguimiento ---------- */
+const ACCIONES = {
+  CREAR: 'Pedido registrado', EDITAR: 'Información modificada', DUPLICAR: 'Pedido creado por duplicación', ASIGNAR_RUTA: 'Ruta asignada', RETIRAR_RUTA: 'Retirado de la ruta',
+  INICIAR_PREPARACION: 'Preparación iniciada', REGISTRAR_ALISTAMIENTO: 'Avance de alistamiento', FINALIZAR_PREPARACION: 'Preparación finalizada',
+  DESPACHAR: 'Pedido despachado', ENTREGAR: 'Entrega registrada', ANULAR: 'Pedido anulado', EXCEPCION_DESPACHO: 'Excepción: despacho sin preparación completa',
+  EXCEPCION_REVERSION: 'Excepción: reversión de estado', ELIMINAR: 'Pedido eliminado', CAMBIAR_ESTADO: 'Cambio de estado', CREAR_RUTA: 'Ruta creada'
+};
+const HITOS = [['CREAR', 'Pedido registrado'], ['INICIAR_PREPARACION', 'Preparación iniciada'], ['FINALIZAR_PREPARACION', 'Preparación finalizada'], ['DESPACHAR', 'Pedido despachado'], ['ENTREGAR', 'Entrega registrada']];
+
+async function openPedido(id) {
+  const m = openModal({ title: 'Detalle del pedido', size: 'lg', body: loadingHTML() });
+  let d;
+  try { d = await api('pedidos.get', { pedido_id: id }); } catch (e) { m.body.innerHTML = errorHTML(e); icons(); return; }
+  if (!m.el.isConnected) return;
+  renderPedidoDetalle(m, d);
+}
+
+function renderPedidoDetalle(m, d) {
+  const p = d.pedido, r = d.resumen;
+  m.el.querySelector('.modal-head h2').textContent = `Pedido ${p.numero_pedido}`;
+  const totalLineas = d.detalles.reduce((a, x) => a + (x.subtotal !== '' ? Number(x.subtotal) : 0), 0);
+  const hayPrecio = d.detalles.some((x) => x.subtotal !== '');
+  // Hitos: se toma el último evento de cada tipo (una reversión puede repetirlos).
+  const ultimo = (acc) => d.historial.filter((h) => h.accion === acc).pop();
+  const timeline = HITOS.map(([acc, lbl]) => {
+    const h = ultimo(acc);
+    return `<li class="${h ? 'done' : ''}"><div class="t-title">${lbl}</div><div class="t-meta">${h ? `${fDT(h.fecha_evento)} · ${esc(h.usuario)}${h.observacion ? ' · ' + esc(h.observacion) : ''}` : 'Pendiente'}</div></li>`;
+  }).join('');
+  const log = d.historial.slice().reverse().map((h) => `<li class="${h.accion.startsWith('EXCEPCION') || h.accion === 'ANULAR' ? 'exc' : 'done'}">
+    <div class="t-title">${esc(ACCIONES[h.accion] || h.accion)}</div>
+    <div class="t-meta">${fDT(h.fecha_evento)} · ${esc(h.usuario)}</div>
+    ${h.valor_anterior || h.valor_nuevo ? `<div class="t-meta">${h.valor_anterior ? esc(h.valor_anterior) + ' → ' : ''}${esc(h.valor_nuevo)}</div>` : ''}
+    ${h.observacion ? `<div class="t-meta"><i>${esc(h.observacion)}</i></div>` : ''}</li>`).join('');
+
+  m.body.innerHTML = `
+    ${p.anulado === 'SI' ? `<div class="notice err"><i data-lucide="ban"></i><div><b>Pedido anulado.</b> ${esc(p.motivo_anulacion)}</div></div>` : ''}
+    ${r.retrasado ? '<div class="notice warn"><i data-lucide="alert-triangle"></i><div>El pedido está <b>retrasado</b>: la fecha estimada de entrega ya pasó.</div></div>' : ''}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">${estadoBadge(p.estado, p.anulado === 'SI')} ${prioBadge(p.prioridad)}
+      ${r.preparado ? '<span class="badge b-ok">Preparación completa</span>' : ''}${r.es_demo ? '<span class="badge b-demo">DEMO</span>' : ''}</div>
+    <div class="tabs" id="pdTabs"><button class="active" data-t="info">Información</button><button data-t="prod">Productos (${d.detalles.length})</button><button data-t="seg">Seguimiento</button><button data-t="hist">Historial (${d.historial.length})</button></div>
+    <div data-pane="info"><div class="dl">
+      <div><span>Cliente</span><b>${esc(p.cliente_nombre)}</b></div><div><span>Documento</span><b>${esc(p.cliente_documento) || '—'}</b></div>
+      <div><span>Teléfono</span><b>${esc(p.cliente_telefono)}</b></div><div><span>Correo</span><b>${esc(p.cliente_correo) || '—'}</b></div>
+      <div><span>Dirección</span><b>${esc(p.direccion_entrega)}</b></div><div><span>Ciudad / zona</span><b>${esc(p.ciudad)} · ${esc(p.zona)}</b></div>
+      <div><span>Creación</span><b>${fDT(p.fecha_creacion)}</b></div><div><span>Entrega estimada</span><b>${fD(p.fecha_estimada_entrega)}</b></div>
+      <div><span>Responsable</span><b>${d.responsable ? esc(d.responsable.nombre) : '—'}</b></div>
+      <div><span>Ruta</span><b>${d.ruta ? esc(d.ruta.codigo_ruta + ' · ' + d.ruta.nombre_ruta) + ' ' + rutaEstadoBadge(d.ruta.estado) : '—'}</b></div>
+      <div><span>Preparó</span><b>${d.preparador ? esc(d.preparador.nombre) : '—'}</b></div>
+      <div><span>Despacho</span><b>${fDT(p.fecha_despacho) || '—'}</b></div>
+      <div><span>Entrega real</span><b>${fDT(p.fecha_entrega) || '—'}</b></div><div><span>Recibió</span><b>${esc(p.recibido_por) || '—'}</b></div>
+      <div><span>Última actualización</span><b>${fDT(p.fecha_actualizacion)} · ${esc(p.actualizado_por)}</b></div>
+      <div style="grid-column:1/-1"><span>Observaciones</span><b>${esc(p.observaciones) || '—'}</b></div>
+      <div style="grid-column:1/-1"><span>Observaciones internas</span><b>${esc(p.observaciones_internas) || '—'}</b></div>
+      ${p.observacion_entrega ? `<div style="grid-column:1/-1"><span>Observación del repartidor</span><b>${esc(p.observacion_entrega)}</b></div>` : ''}
+    </div></div>
+    <div data-pane="prod" class="hidden">${tableHTML([
+      { label: 'SKU', key: 'sku' }, { label: 'Producto', key: 'nombre_producto' },
+      { label: 'Cantidad', cls: 'num', render: (x) => fNum(x.cantidad) }, { label: 'Preparado', cls: 'num', render: (x) => fNum(x.cantidad_preparada) },
+      { label: 'Precio unit.', cls: 'num', render: (x) => x.precio_unitario !== '' ? fCOP(x.precio_unitario) : '—' },
+      { label: 'Subtotal', cls: 'num', render: (x) => x.subtotal !== '' ? fCOP(x.subtotal) : '—' }, { label: 'Observación', key: 'observaciones' }], d.detalles)}
+      <div class="lines-total">${fNum(r.unidades)} unidades${hayPrecio ? ' · Total ' + fCOP(totalLineas) : ''}</div>
+      ${hayPrecio ? '<p class="help">Los valores corresponden al precio comercial registrado; no representan el costo logístico.</p>' : ''}</div>
+    <div data-pane="seg" class="hidden"><ul class="timeline">${timeline}</ul></div>
+    <div data-pane="hist" class="hidden">${d.historial.length ? `<ul class="timeline">${log}</ul>` : emptyHTML('Sin eventos registrados.')}</div>`;
+
+  $('#pdTabs', m.el).onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    $$('#pdTabs button', m.el).forEach((x) => x.classList.toggle('active', x === b));
+    $$('[data-pane]', m.el).forEach((x) => x.classList.toggle('hidden', x.dataset.pane !== b.dataset.t));
+  };
+
+  // Acciones según estado y permisos (el servidor vuelve a validarlas).
+  const activo = p.anulado !== 'SI';
+  const btns = [];
+  btns.push(`<button class="btn" data-a="print"><i data-lucide="printer"></i>Orden de preparación</button>`);
+  if (d.editables.length) btns.push(`<button class="btn" data-a="edit"><i data-lucide="pencil"></i>Editar</button>`);
+  if (can('pedidos.duplicar')) btns.push(`<button class="btn" data-a="dup"><i data-lucide="copy"></i>Duplicar</button>`);
+  if (activo && can('preparacion.gestionar') && p.estado === 'Pendiente') btns.push(`<button class="btn warn" data-a="iniciar"><i data-lucide="play"></i>Iniciar preparación</button>`);
+  if (activo && can('preparacion.gestionar') && p.estado === 'En preparación' && !p.fecha_fin_preparacion) btns.push(`<button class="btn warn" data-a="alistar"><i data-lucide="clipboard-check"></i>Registrar alistamiento</button>`);
+  if (activo && can('despacho.gestionar') && p.estado === 'En preparación') btns.push(`<button class="btn primary" data-a="despachar"><i data-lucide="truck"></i>Despachar</button>`);
+  if (activo && can('entrega.registrar') && p.estado === 'Despachado') btns.push(`<button class="btn success" data-a="entregar"><i data-lucide="package-check"></i>Registrar entrega</button>`);
+  if (activo && can('excepciones.autorizar') && p.estado !== 'Pendiente') btns.push(`<button class="btn" data-a="revertir"><i data-lucide="undo-2"></i>Revertir estado</button>`);
+  if (activo && can('pedidos.anular') && p.estado !== 'Entregado') btns.push(`<button class="btn danger" data-a="anular"><i data-lucide="ban"></i>Anular</button>`);
+  if (activo && can('pedidos.eliminar') && p.estado === 'Pendiente' && !p.ruta_id && !p.fecha_inicio_preparacion) btns.push(`<button class="btn danger" data-a="eliminar"><i data-lucide="trash-2"></i>Eliminar</button>`);
+  let foot = m.el.querySelector('.modal-foot');
+  if (!foot) { foot = document.createElement('div'); foot.className = 'modal-foot'; m.el.querySelector('.modal').appendChild(foot); }
+  foot.innerHTML = btns.join('');
+  const reload = async () => {
+    refreshCurrent();
+    try { const nd = await api('pedidos.get', { pedido_id: p.pedido_id }); if (m.el.isConnected) renderPedidoDetalle(m, nd); } catch (e) { toast(errMsg(e), 'error'); }
+  };
+  foot.onclick = async (e) => {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const a = b.dataset.a;
+    if (a === 'print') return printOrden(d);
+    if (a === 'edit') { m.close(); return openPedidoForm(p.pedido_id); }
+    if (a === 'dup') {
+      if (!await confirmDialog({ title: 'Duplicar pedido', message: `Se creará un nuevo pedido <b>Pendiente</b> con el mismo cliente y productos de ${esc(p.numero_pedido)}, sin ruta asignada.`, confirmText: 'Duplicar' })) return;
+      const r = await run('pedidos.duplicate', { pedido_id: p.pedido_id }, b, 'Pedido duplicado.');
+      if (r) { m.close(); refreshCurrent(); openPedido(r.pedido_id); }
+      return;
+    }
+    if (a === 'iniciar') { if (await iniciarPreparacion(p, b)) reload(); return; }
+    if (a === 'alistar') return openAlistamiento(p.pedido_id, reload);
+    if (a === 'despachar') return openDespacho(p.pedido_id, reload);
+    if (a === 'entregar') return openEntrega(p, reload);
+    if (a === 'revertir') {
+      const prev = { 'En preparación': 'Pendiente', 'Despachado': 'En preparación', 'Entregado': 'Despachado' }[p.estado];
+      const just = await confirmDialog({ title: 'Revertir estado (excepción)', danger: true, confirmText: 'Revertir',
+        message: `El pedido pasará de <b>${esc(p.estado)}</b> a <b>${esc(prev)}</b>. Se borrarán las fechas del estado actual y la excepción quedará registrada en el historial.`,
+        input: { label: 'Justificación', required: true, min: 10 } });
+      if (just === false) return;
+      if (await run('flujo.revertir', { pedido_id: p.pedido_id, version: p.version, justificacion: just }, b, 'Estado revertido.')) reload();
+      return;
+    }
+    if (a === 'anular') {
+      const motivo = await confirmDialog({ title: 'Anular pedido', danger: true, confirmText: 'Anular pedido',
+        message: `El pedido <b>${esc(p.numero_pedido)}</b> quedará anulado: no se podrá modificar ni avanzar y dejará de contar en los indicadores. Su historial se conserva. Esta acción no se puede deshacer desde la aplicación.`,
+        input: { label: 'Motivo de la anulación', required: true, min: 10 } });
+      if (motivo === false) return;
+      if (await run('pedidos.anular', { pedido_id: p.pedido_id, version: p.version, motivo }, b, 'Pedido anulado.')) reload();
+      return;
+    }
+    if (a === 'eliminar') {
+      const motivo = await confirmDialog({ title: 'Eliminar pedido', danger: true, confirmText: 'Eliminar definitivamente',
+        message: `Se eliminará <b>definitivamente</b> el pedido ${esc(p.numero_pedido)} y sus productos. Solo queda constancia en la auditoría. Si el pedido debe conservarse, use <b>Anular</b>.`,
+        input: { label: 'Motivo', required: true, min: 10 } });
+      if (motivo === false) return;
+      if (await run('pedidos.eliminar', { pedido_id: p.pedido_id, version: p.version, motivo }, b, 'Pedido eliminado.')) { m.close(); refreshCurrent(); }
+    }
+  };
+  icons();
+}
+
+/* ---------- Impresión de la orden de preparación ---------- */
+function printOrden(d) {
+  const p = d.pedido;
+  const html = `<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><title>Orden ${esc(p.numero_pedido)}</title><style>
+    body{font-family:Arial,sans-serif;font-size:12px;color:#111827;margin:24px}h1{font-size:18px;margin:0;color:#4F46E5}
+    table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #CBD5E1;padding:6px;text-align:left}th{background:#F1F5F9}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;margin-top:12px}.box{width:16px;height:16px;border:1px solid #111;display:inline-block}
+    .firma{margin-top:40px;display:flex;gap:40px}.firma div{flex:1;border-top:1px solid #111;padding-top:4px;text-align:center}</style></head><body>
+    <h1>Orden de preparación · ${esc(p.numero_pedido)}</h1><div>${esc(S.cfg.nombre_empresa || '')} · Impresa el ${fDT(nowBogLocal())}</div>
+    <div class="grid"><div><b>Cliente:</b> ${esc(p.cliente_nombre)}</div><div><b>Teléfono:</b> ${esc(p.cliente_telefono)}</div>
+    <div><b>Dirección:</b> ${esc(p.direccion_entrega)}, ${esc(p.zona)}, ${esc(p.ciudad)}</div><div><b>Entrega estimada:</b> ${fD(p.fecha_estimada_entrega)}</div>
+    <div><b>Prioridad:</b> ${esc(p.prioridad)}</div><div><b>Ruta:</b> ${d.ruta ? esc(d.ruta.codigo_ruta + ' · ' + d.ruta.nombre_ruta) : 'Sin ruta'}</div>
+    <div><b>Responsable:</b> ${d.responsable ? esc(d.responsable.nombre) : '—'}</div><div><b>Estado:</b> ${esc(p.estado)}</div></div>
+    <table><thead><tr><th>✓</th><th>SKU</th><th>Producto</th><th>Cantidad</th><th>Preparado</th><th>Observación</th></tr></thead><tbody>
+    ${d.detalles.map((x) => `<tr><td><span class="box"></span></td><td>${esc(x.sku)}</td><td>${esc(x.nombre_producto)}</td><td>${fNum(x.cantidad)}</td><td></td><td>${esc(x.observaciones)}</td></tr>`).join('')}
+    </tbody></table>
+    ${p.observaciones ? `<p><b>Observaciones:</b> ${esc(p.observaciones)}</p>` : ''}${p.observaciones_internas ? `<p><b>Observaciones internas:</b> ${esc(p.observaciones_internas)}</p>` : ''}
+    <div class="firma"><div>Preparó</div><div>Revisó</div></div></body></html>`;
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;width:0;height:0;border:0;right:0;bottom:0';
+  document.body.appendChild(iframe);
+  const doc = iframe.contentWindow.document;
+  doc.open(); doc.write(html); doc.close();
+  setTimeout(() => { try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { toast('No fue posible abrir la impresión.', 'error'); } setTimeout(() => iframe.remove(), 1000); }, 250);
+}
+</script>

@@ -1,6 +1,7 @@
 /**
  * Config.gs — Configuración global, esquema de datos, estados y matriz de permisos.
  * Este archivo solo se ejecuta en el servidor: el identificador de la hoja nunca llega al navegador.
+ * SPREADSHEET_ID: reemplazar por el ID de su hoja (la parte de la URL entre /d/ y /edit), sin barras ni espacios.
  */
 
 const CONFIG = Object.freeze({

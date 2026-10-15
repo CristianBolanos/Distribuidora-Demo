@@ -66,6 +66,7 @@ Columnas añadidas al mínimo pedido (justificadas en `Config.gs`): fechas de in
 | `Historial.gs` | Auditoría. |
 | `Reportes.gs` | Dashboard, alertas, 10 informes, CSV y PDF. |
 | `Setup.gs` | `setupDatabase()`, `seedDemoData()`, `purgeDemoData()`. |
+| `Formato.gs` | `formatSpreadsheet()`: diseño visual de las hojas y panel Resumen con gráficos. |
 | `Tests.gs` | `runTests()`: pruebas de reglas de negocio. |
 | `Index.html` | Estructura principal. |
 | `Styles.html` | Estilos (paleta solicitada, responsive). |
@@ -88,6 +89,7 @@ Columnas añadidas al mínimo pedido (justificadas en `Config.gs`): fechas de in
 5. **Autorizar** los permisos que solicita Google (hojas de cálculo, correo del usuario).
 6. **(Opcional) Datos de demostración:** ejecute `seedDemoData`. Para retirarlos: `purgeDemoData`. Si la base ya tiene pedidos reales o `modo_produccion=SI`, primero cree la propiedad de script `CONFIRMAR_DEMO=SI`.
 7. **Pruebas:** ejecute `runTests` y revise el registro (13 pruebas).
+7b. **Presentación de la hoja (opcional, recomendado):** abra `Formato.gs` y ejecute `formatSpreadsheet`. Aplica colores, filas alternadas, anchos de columna, colores por estado y prioridad, resaltado de fechas vencidas, y crea la hoja **Resumen**: un panel con indicadores, tablas y gráficos que se actualizan solos con fórmulas. Se puede volver a ejecutar sin riesgo (no toca los datos). Las hojas de datos muestran una advertencia si alguien intenta editarlas a mano.
 8. **Publicar:** *Implementar → Nueva implementación → Aplicación web*:
    - **Ejecutar como:** Yo (propietario).
    - **Quién tiene acceso:** Cualquier usuario de *su dominio* (p. ej., cali.gov.co).

@@ -96,7 +96,11 @@ function appendRows_(name, objs) {
   if (!objs.length) return;
   const info = headerInfo_(name);
   const rows = objs.map(function (o) { return rowFrom_(name, o); });
-  info.sh.getRange(info.sh.getLastRow() + 1, 1, rows.length, info.width).setNumberFormat('@').setValues(rows);
+  const start = info.sh.getLastRow() + 1;
+  // Sheets no permite escribir fuera de la cuadrícula: se agregan filas cuando se agota (por defecto hay 1 000).
+  const faltan = start + rows.length - 1 - info.sh.getMaxRows();
+  if (faltan > 0) info.sh.insertRowsAfter(info.sh.getMaxRows(), faltan + 500);
+  info.sh.getRange(start, 1, rows.length, info.width).setNumberFormat('@').setValues(rows);
   invalidate_(name);
 }
 

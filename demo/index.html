@@ -327,6 +327,7 @@ table.t tr.muted td { color: var(--text2); text-decoration: line-through; }
     getMaxRows() { return Math.max(1000, this.data.length); }
     getRange(r, c, nr, nc) { return new FakeRange(this, r, c, nr, nc); }
     setFrozenRows() { return this; }
+    insertRowsAfter() { return this; }
     deleteRow(r) { this.data.splice(r - 1, 1); }
   }
 
@@ -452,6 +453,7 @@ table.t tr.muted td { color: var(--text2); text-decoration: line-through; }
 /**
  * Config.gs — Configuración global, esquema de datos, estados y matriz de permisos.
  * Este archivo solo se ejecuta en el servidor: el identificador de la hoja nunca llega al navegador.
+ * SPREADSHEET_ID: reemplazar por el ID de su hoja (la parte de la URL entre /d/ y /edit), sin barras ni espacios.
  */
 
 const CONFIG = Object.freeze({
@@ -867,7 +869,11 @@ function appendRows_(name, objs) {
   if (!objs.length) return;
   const info = headerInfo_(name);
   const rows = objs.map(function (o) { return rowFrom_(name, o); });
-  info.sh.getRange(info.sh.getLastRow() + 1, 1, rows.length, info.width).setNumberFormat('@').setValues(rows);
+  const start = info.sh.getLastRow() + 1;
+  // Sheets no permite escribir fuera de la cuadrícula: se agregan filas cuando se agota (por defecto hay 1 000).
+  const faltan = start + rows.length - 1 - info.sh.getMaxRows();
+  if (faltan > 0) info.sh.insertRowsAfter(info.sh.getMaxRows(), faltan + 500);
+  info.sh.getRange(start, 1, rows.length, info.width).setNumberFormat('@').setValues(rows);
   invalidate_(name);
 }
 

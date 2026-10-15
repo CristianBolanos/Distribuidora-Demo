@@ -63,6 +63,7 @@
     getMaxRows() { return Math.max(1000, this.data.length); }
     getRange(r, c, nr, nc) { return new FakeRange(this, r, c, nr, nc); }
     setFrozenRows() { return this; }
+    insertRowsAfter() { return this; }
     deleteRow(r) { this.data.splice(r - 1, 1); }
   }
 

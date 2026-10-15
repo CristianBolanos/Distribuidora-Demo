@@ -92,7 +92,7 @@ Columnas añadidas al mínimo pedido (justificadas en `Config.gs`): fechas de in
 7b. **Presentación de la hoja (opcional, recomendado):** abra `Formato.gs` y ejecute `formatSpreadsheet`. Aplica colores, filas alternadas, anchos de columna, colores por estado y prioridad, resaltado de fechas vencidas, y crea la hoja **Resumen**: un panel con indicadores, tablas y gráficos que se actualizan solos con fórmulas. Se puede volver a ejecutar sin riesgo (no toca los datos). Las hojas de datos muestran una advertencia si alguien intenta editarlas a mano.
 8. **Publicar:** *Implementar → Nueva implementación → Aplicación web*:
    - **Ejecutar como:** Yo (propietario).
-   - **Quién tiene acceso:** Cualquier usuario de *su dominio* (p. ej., cali.gov.co).
+   - **Quién tiene acceso:** Cualquier usuario de *su dominio* (p. ej., miempresa.com).
 9. **Usuarios:** abra la URL, vaya a *Usuarios y permisos* y registre el correo de Google y el rol de cada persona.
 10. **Acceso restringido:** no comparta la hoja de cálculo con los usuarios finales (la app la usa con la identidad del propietario). Solo administradores técnicos deben tener acceso al proyecto y a la hoja.
 

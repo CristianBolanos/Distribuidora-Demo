@@ -166,6 +166,7 @@ function buildResumen_() {
   sh.setFrozenRows(0);
   if (sh.getMaxColumns() < 16) sh.insertColumnsAfter(sh.getMaxColumns(), 16 - sh.getMaxColumns());
   if (sh.getMaxRows() < 95) sh.insertRowsAfter(sh.getMaxRows(), 95 - sh.getMaxRows());
+  sh.getRange('A1:P95').breakApart(); // clear() no deshace las combinaciones de una ejecución anterior
   sh.getRange('A1:P95').setFontFamily('Inter').setFontColor(THEME.text).setVerticalAlignment('middle').setBackground(THEME.band);
   sh.setColumnWidth(1, 24);
   for (let c = 2; c <= 13; c++) sh.setColumnWidth(c, 105);
@@ -280,7 +281,7 @@ function buildResumen_() {
     .setOption('width', 560).setOption('height', 320).setOption('backgroundColor', THEME.band).build());
 
   // 5) Responsables
-  section('B69:M69', 'Pedidos abiertos por responsable');
+  section('B69:C69', 'Pedidos abiertos por responsable'); // E69:M69 lo ocupa la alerta de retrasados
   table('B70:C70', ['Responsable', 'Abiertos']);
   sh.getRange('P71').setFormula('=IFERROR(ARRAY_CONSTRAIN(FILTER(' + U('usuario_id') + ',' + U('activo') + '="SI"),12,1),"")');
   sh.getRange('B71').setFormula('=IFERROR(ARRAY_CONSTRAIN(FILTER(' + U('nombre') + ',' + U('activo') + '="SI"),12,1),"")');
